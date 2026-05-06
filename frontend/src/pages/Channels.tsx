@@ -8,11 +8,15 @@ export default function Channels() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [probingId, setProbingId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   async function load() {
     setLoading(true)
+    setError('')
     try {
       setChannels(await channelsApi.list())
+    } catch {
+      setError('加载失败')
     } finally {
       setLoading(false)
     }
@@ -22,19 +26,35 @@ export default function Channels() {
 
   async function handleProbe(id: string) {
     setProbingId(id)
-    await channelsApi.probe(id)
-    setTimeout(() => { setProbingId(null); load() }, 2000)
+    setError('')
+    try {
+      await channelsApi.probe(id)
+      setTimeout(() => { setProbingId(null); load() }, 2000)
+    } catch {
+      setProbingId(null)
+      setError('探测失败')
+    }
   }
 
   async function handleToggle(ch: Channel) {
-    await channelsApi.update(ch.id, { enabled: !ch.enabled })
-    load()
+    setError('')
+    try {
+      await channelsApi.update(ch.id, { enabled: !ch.enabled })
+      load()
+    } catch {
+      setError('操作失败')
+    }
   }
 
   async function handleDelete(id: string) {
     if (!confirm('确认删除该厂商及其所有模型数据？')) return
-    await channelsApi.delete(id)
-    load()
+    setError('')
+    try {
+      await channelsApi.delete(id)
+      load()
+    } catch {
+      setError('删除失败')
+    }
   }
 
   return (
@@ -51,6 +71,10 @@ export default function Channels() {
           ＋ 添加厂商
         </button>
       </div>
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-2">{error}</p>
+      )}
 
       {loading && channels.length === 0 ? (
         <div className="text-center py-20 text-gray-400 text-sm animate-pulse">加载中...</div>

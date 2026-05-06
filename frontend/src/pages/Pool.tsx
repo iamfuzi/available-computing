@@ -21,9 +21,11 @@ export default function Pool() {
   const [menuOpen, setMenuOpen] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const menuRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const navigate = useNavigate()
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true)
     try {
       const [s, m] = await Promise.all([
@@ -33,16 +35,25 @@ export default function Pool() {
           q: q || undefined,
           category: category !== '全部' ? CAT_MAP[category] : undefined,
           healthy_only: healthyOnly || undefined,
-        }),
+        }, signal),
       ])
       setSummary(s)
       setModels(m)
+    } catch (e) {
+      if (!(e instanceof Error && e.name === 'AbortError')) throw e
     } finally {
       setLoading(false)
     }
   }, [q, category, healthyOnly])
 
-  useEffect(() => { loadData() }, [loadData])
+  useEffect(() => {
+    clearTimeout(debounceRef.current)
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
+    debounceRef.current = setTimeout(() => loadData(ac.signal), 200)
+    return () => { ac.abort(); clearTimeout(debounceRef.current) }
+  }, [loadData])
 
   // Close menu on outside click
   useEffect(() => {
@@ -81,7 +92,7 @@ export default function Pool() {
         </div>
         <div className="flex gap-2">
           <button
-            onClick={loadData}
+            onClick={() => loadData()}
             disabled={loading}
             className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-white transition-colors disabled:opacity-50"
           >
@@ -110,7 +121,14 @@ export default function Pool() {
                 : undefined
             }
           />
-          <StatCard label="今日调用" value="—" sub="V1.0+" />
+          <StatCard
+            label="平均延迟"
+            value={
+              models.length > 0 && models.some(m => m.last_response_ms)
+                ? `${Math.round(models.filter(m => m.last_response_ms).reduce((s, m) => s + (m.last_response_ms || 0), 0) / models.filter(m => m.last_response_ms).length)}ms`
+                : '—'
+            }
+          />
         </div>
       )}
 

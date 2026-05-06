@@ -6,7 +6,7 @@ import uuid
 
 class Model(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    channel_id: str = Field(foreign_key="channel.id")
+    channel_id: str = Field(foreign_key="channel.id", ondelete="CASCADE")
     model_id: str
     display_name: Optional[str] = None
     category: Optional[str] = None          # text / vision / code / embedding

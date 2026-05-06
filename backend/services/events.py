@@ -1,8 +1,10 @@
 import asyncio
 import json
+import logging
 from typing import Callable
 
 _listeners: list[Callable] = []
+logger = logging.getLogger(__name__)
 
 
 def subscribe(callback: Callable):
@@ -10,7 +12,6 @@ def subscribe(callback: Callable):
 
 
 def unsubscribe(callback: Callable):
-    _listeners.discard(callback) if hasattr(_listeners, "discard") else None
     if callback in _listeners:
         _listeners.remove(callback)
 
@@ -24,4 +25,4 @@ async def broadcast(event: str, data: dict):
             else:
                 callback(message)
         except Exception:
-            pass
+            logger.exception("Event listener failed")

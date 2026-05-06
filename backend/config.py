@@ -12,7 +12,12 @@ WHITELIST_PATH = Path(os.environ.get(
     str(Path(__file__).parent.parent / "whitelist" / "providers.yaml"),
 ))
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-in-production")
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
+if not JWT_SECRET:
+    raise RuntimeError(
+        "JWT_SECRET environment variable is required. "
+        "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_DAYS = 7
 

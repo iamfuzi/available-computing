@@ -7,10 +7,14 @@ export function useWebSocket(onMessage: Handler) {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const handlerRef = useRef(onMessage)
   handlerRef.current = onMessage
+  const retryCount = useRef(0)
 
   const connect = useCallback(() => {
+    const token = localStorage.getItem('token')
+    if (!token) return
+
     const protocol = location.protocol === 'https:' ? 'wss' : 'ws'
-    const socket = new WebSocket(`${protocol}://${location.host}/ws/events`)
+    const socket = new WebSocket(`${protocol}://${location.host}/ws/events?token=${encodeURIComponent(token)}`)
 
     socket.onmessage = (e) => {
       try {
@@ -22,11 +26,17 @@ export function useWebSocket(onMessage: Handler) {
     }
 
     socket.onclose = () => {
-      reconnectTimer.current = setTimeout(connect, 3000)
+      const delay = Math.min(3000 * Math.pow(2, retryCount.current), 30000)
+      retryCount.current += 1
+      reconnectTimer.current = setTimeout(connect, delay)
     }
 
     socket.onerror = () => {
       socket.close()
+    }
+
+    socket.onopen = () => {
+      retryCount.current = 0
     }
 
     // Keep-alive ping every 30s

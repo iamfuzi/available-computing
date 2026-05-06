@@ -1,6 +1,6 @@
 import json
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlmodel import Session, select
 
 from database import engine
@@ -41,11 +41,19 @@ def _determine_free(model: ModelInfo, provider_id: str, adapter) -> dict:
     return {"is_free": None, "free_type": "unknown", "free_source": "unknown"}
 
 
-async def discover_channel(channel_id: str, decrypted_key: str):
+async def discover_channel(channel_id: str, decrypted_key: str | None = None):
     with Session(engine) as session:
         channel = session.get(Channel, channel_id)
         if not channel:
             return
+        # Decrypt key from DB if not provided
+        if decrypted_key is None:
+            from services.crypto import decrypt as _decrypt
+            from api.channels import _get_salt
+            import base64
+            from config import get_admin_password
+            salt = _get_salt(session)
+            decrypted_key = _decrypt(channel.api_key_enc, get_admin_password(), salt)
 
     adapter = get_adapter(channel.provider_type)
     base_url = channel.base_url or adapter.default_base_url
@@ -111,20 +119,22 @@ async def discover_channel(channel_id: str, decrypted_key: str):
                 m.is_active = False
                 session.add(m)
 
-        channel.last_probed_at = datetime.utcnow()
+        channel.last_probed_at = datetime.now(timezone.utc)
         session.add(channel)
         session.commit()
 
     await events.broadcast("pool_updated", {"channel_id": channel_id})
 
 
-async def discover_all_channels(get_key_fn):
-    """Probe all enabled channels. get_key_fn(channel) -> decrypted key string."""
+async def discover_all_channels(get_key_fn=None):
+    """Probe all enabled channels. get_key_fn is deprecated — keys are decrypted from DB."""
     with Session(engine) as session:
         channels = session.exec(select(Channel).where(Channel.enabled == True)).all()
 
-    tasks = [
-        discover_channel(ch.id, get_key_fn(ch))
-        for ch in channels
-    ]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    semaphore = asyncio.Semaphore(5)
+
+    async def bounded(ch):
+        async with semaphore:
+            await discover_channel(ch.id)
+
+    await asyncio.gather(*[bounded(ch) for ch in channels], return_exceptions=True)

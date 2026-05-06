@@ -98,7 +98,10 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
                   </button>
                 )
               })}
-              <button className="border border-dashed border-gray-300 rounded-xl p-3 text-sm text-gray-400 hover:text-gray-600 hover:border-gray-400 transition-colors">
+              <button
+                onClick={() => window.open('https://github.com/iamfuzi/available-computing/issues', '_blank')}
+                className="border border-dashed border-gray-300 rounded-xl p-3 text-sm text-gray-400 hover:text-gray-600 hover:border-gray-400 transition-colors"
+              >
                 没找到？请求支持新厂商 →
               </button>
             </div>

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from jose import jwt, JWTError
+from config import JWT_SECRET, JWT_ALGORITHM
 from services import events
 
 router = APIRouter()
@@ -19,12 +21,16 @@ events.subscribe(_send)
 
 
 @router.websocket("/ws/events")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str = Query()):
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
     await websocket.accept()
     _connections.add(websocket)
     try:
         while True:
-            # Keep alive — client can send pings
             await websocket.receive_text()
     except WebSocketDisconnect:
         _connections.discard(websocket)

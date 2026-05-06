@@ -69,6 +69,13 @@ function Layout({ children }: { children: React.ReactNode }) {
             <span>{item.label}</span>
           </NavLink>
         ))}
+        <button
+          onClick={() => { localStorage.removeItem('token'); window.location.href = '/login' }}
+          className="flex-1 flex flex-col items-center py-2 text-xs text-gray-400 transition-colors"
+        >
+          <span className="text-lg">🚪</span>
+          <span>退出</span>
+        </button>
       </nav>
 
       {/* Main content with bottom padding on mobile for nav */}

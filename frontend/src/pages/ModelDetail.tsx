@@ -69,13 +69,20 @@ export default function ModelDetail() {
     ]).then(([m, h]) => {
       setModel(m)
       setHistory(h)
+    }).catch(() => {
+      // model stays null, will show blank state
     }).finally(() => setLoading(false))
   }, [id, period])
 
   if (loading && !model) return <div className="p-8 text-gray-400 text-sm animate-pulse">加载中...</div>
   if (!model) return null
 
-  const rateLimit = model.rate_limit ? JSON.parse(model.rate_limit) : null
+  let rateLimit = null
+  try {
+    rateLimit = model.rate_limit ? JSON.parse(model.rate_limit) : null
+  } catch {
+    rateLimit = null
+  }
 
   function copyExample() {
     navigator.clipboard.writeText(buildExample(model!, tab))

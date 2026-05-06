@@ -44,8 +44,8 @@ export const channelsApi = {
 }
 
 export const modelsApi = {
-  list: (params?: ModelListParams) =>
-    api.get<ModelRow[]>('/models', { params }).then((r) => r.data),
+  list: (params?: ModelListParams, signal?: AbortSignal) =>
+    api.get<ModelRow[]>('/models', { params, signal }).then((r) => r.data),
   get: (id: string) => api.get<ModelRow>(`/models/${id}`).then((r) => r.data),
   healthHistory: (id: string, period: '24h' | '7d' = '24h') =>
     api.get<HealthRecord[]>(`/models/${id}/health-history`, { params: { period } }).then((r) => r.data),

@@ -6,22 +6,30 @@ export default function SettingsPage() {
   const [settings, setSettings] = useState<SettingsType | null>(null)
   const [saved, setSaved] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    settingsApi.get().then((s) => { setSettings(s); setLoading(false) })
+    settingsApi.get()
+      .then((s) => { setSettings(s); setLoading(false) })
+      .catch(() => { setError('加载失败'); setLoading(false) })
   }, [])
 
   if (loading) return <div className="p-8 text-gray-400 text-sm animate-pulse">加载中...</div>
   if (!settings) return null
 
   async function handleSave() {
-    await settingsApi.update({
-      discovery_interval_hours: settings!.discovery_interval_hours,
-      probe_interval_hours: settings!.probe_interval_hours,
-      slow_threshold_ms: settings!.slow_threshold_ms,
-    })
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    setError('')
+    try {
+      await settingsApi.update({
+        discovery_interval_hours: settings!.discovery_interval_hours,
+        probe_interval_hours: settings!.probe_interval_hours,
+        slow_threshold_ms: settings!.slow_threshold_ms,
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch {
+      setError('保存失败，请重试')
+    }
   }
 
   return (
@@ -79,6 +87,10 @@ export default function SettingsPage() {
           <span className="text-xs text-gray-500">本地 SQLite，不上云</span>
         </div>
       </div>
+
+      {error && (
+        <p className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-2">{error}</p>
+      )}
 
       <button
         onClick={handleSave}

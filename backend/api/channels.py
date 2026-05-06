@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import threading
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from sqlmodel import Session, select
@@ -15,17 +16,19 @@ from config import get_admin_password
 
 router = APIRouter()
 
+_salt_lock = threading.Lock()
+
 
 def _get_salt(session: Session) -> bytes:
-    from models import Setting
-    setting = session.get(Setting, "crypto_salt")
-    if not setting:
-        salt = generate_salt()
+    with _salt_lock:
         from models import Setting
-        session.add(Setting(key="crypto_salt", value=base64.b64encode(salt).decode()))
-        session.commit()
-        return salt
-    return base64.b64decode(setting.value)
+        setting = session.get(Setting, "crypto_salt")
+        if not setting:
+            salt = generate_salt()
+            session.add(Setting(key="crypto_salt", value=base64.b64encode(salt).decode()))
+            session.commit()
+            return salt
+        return base64.b64decode(setting.value)
 
 
 def _encrypt_key(key: str, session: Session) -> str:
@@ -108,8 +111,7 @@ async def create_channel(
     session.refresh(channel)
 
     # Async discovery — don't block the response
-    decrypted = body.api_key
-    background_tasks.add_task(discover_channel, channel.id, decrypted)
+    background_tasks.add_task(discover_channel, channel.id)
 
     return {**channel.model_dump(), "api_key_hint": "••••" + body.api_key[-4:]}
 
@@ -144,16 +146,7 @@ def delete_channel(
     ch = session.get(Channel, channel_id)
     if not ch:
         raise HTTPException(404)
-    # Cascade delete models and health records
-    from models import HealthRecord
-    models = session.exec(select(Model).where(Model.channel_id == channel_id)).all()
-    for m in models:
-        session.exec(
-            select(HealthRecord).where(HealthRecord.model_id == m.id)
-        )
-        for hr in session.exec(select(HealthRecord).where(HealthRecord.model_id == m.id)).all():
-            session.delete(hr)
-        session.delete(m)
+    # CASCADE DELETE on foreign keys handles models and health records
     session.delete(ch)
     session.commit()
 

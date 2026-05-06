@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlmodel import Session, select
 
 from database import engine
@@ -38,8 +38,8 @@ async def record_passive_health(
         if m:
             m.health_status = status
             m.last_response_ms = response_ms
-            m.last_checked_at = datetime.utcnow()
-            m.last_real_call_at = datetime.utcnow()
+            m.last_checked_at = datetime.now(timezone.utc)
+            m.last_real_call_at = datetime.now(timezone.utc)
             session.add(m)
 
         session.commit()
@@ -48,14 +48,14 @@ async def record_passive_health(
 async def active_probe(model: Model, decrypted_key: str):
     # Skip if there was a real call within the last 4 hours
     if model.last_real_call_at:
-        if datetime.utcnow() - model.last_real_call_at < timedelta(hours=4):
+        if datetime.now(timezone.utc) - model.last_real_call_at < timedelta(hours=4):
             return
 
     # Quota protection: no more than 5% of daily limit
     daily_limit = _get_daily_limit(model)
     if daily_limit:
         with Session(engine) as session:
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
             probe_count = len(session.exec(
                 select(HealthRecord)
                 .where(HealthRecord.model_id == model.id)
@@ -95,7 +95,7 @@ async def active_probe(model: Model, decrypted_key: str):
         if m:
             m.health_status = health.status
             m.last_response_ms = health.response_ms
-            m.last_checked_at = datetime.utcnow()
+            m.last_checked_at = datetime.now(timezone.utc)
             # Update observed rate limits from response headers (always overwrites)
             if health.observed_rate_limit:
                 import json as _json
@@ -108,7 +108,7 @@ async def active_probe(model: Model, decrypted_key: str):
                 existing_rl.update(health.observed_rate_limit)
                 m.rate_limit = _json.dumps(existing_rl)
                 m.rate_limit_source = "observed"
-                m.rate_limit_updated_at = datetime.utcnow()
+                m.rate_limit_updated_at = datetime.now(timezone.utc)
             session.add(m)
 
         session.commit()
@@ -124,24 +124,27 @@ def _get_daily_limit(model: Model) -> int | None:
         return None
 
 
-async def probe_all_stale_models(get_key_fn):
+async def probe_all_stale_models(get_key_fn=None):
     """Active-probe all models with no real call in the past 4 hours."""
     with Session(engine) as session:
-        models = session.exec(
+        stale_models = session.exec(
             select(Model).where(Model.is_active == True).where(Model.is_free == True)
         ).all()
 
     from models import Channel
     tasks = []
-    for m in models:
+    for m in stale_models:
         with Session(engine) as session:
             ch = session.get(Channel, m.channel_id)
             if not ch or not ch.enabled:
                 continue
-            key = get_key_fn(ch)
+            from services.crypto import decrypt as _decrypt
+            from api.channels import _get_salt
+            from config import get_admin_password
+            salt = _get_salt(session)
+            key = _decrypt(ch.api_key_enc, get_admin_password(), salt)
         tasks.append(active_probe(m, key))
 
-    # Run up to 20 concurrent probes to avoid hammering providers
     semaphore = asyncio.Semaphore(20)
 
     async def bounded(coro):
