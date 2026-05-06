@@ -1,0 +1,18 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - ADMIN_PASSWORD_FILE=/run/secrets/ac_admin_password
+    secrets:
+      - ac_admin_password
+    restart: unless-stopped
+
+secrets:
+  ac_admin_password:
+    file: ./secrets/admin_password.txt

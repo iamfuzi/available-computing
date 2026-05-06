@@ -1,0 +1,11 @@
+data/
+secrets/
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+node_modules/
+frontend/dist/
+*.sqlite
+.DS_Store
