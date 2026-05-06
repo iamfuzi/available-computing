@@ -35,9 +35,10 @@ Available Computing 自动帮你盯着这些事。
 git clone https://github.com/iamfuzi/available-computing.git
 cd available-computing
 
-# 2. 设置管理员密码
+# 2. 设置密码和 JWT 密钥
 mkdir -p secrets
 echo "your-secure-password" > secrets/admin_password.txt
+python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(32))"
 
 # 3. 启动
 docker compose up -d
@@ -48,13 +49,43 @@ open http://localhost:8080
 
 首次访问用设置的密码登录，然后添加你的 API Key 即可。
 
+### OpenAI 兼容代理
+
+添加厂商后，可以用 OpenAI SDK 统一调用所有免费模型：
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="你的JWT token",       # 登录后获得的 token
+    base_url="http://localhost:8080/v1"
+)
+
+# 自动路由到 Gemini
+client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "你好"}]
+)
+
+# 或路由到 OpenRouter 的免费模型
+client.chat.completions.create(
+    model="google/gemma-4-31b-it:free",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True
+)
+```
+
+支持流式（SSE）和非流式，自动记录被动健康数据。
+
 ### 开发
 
 ```bash
 # 后端（需要 Python 3.12+）
 cd backend
 pip install -r requirements.txt
-ADMIN_PASSWORD=dev uvicorn main:app --reload --port 8000
+export JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+export ADMIN_PASSWORD=dev
+uvicorn main:app --reload --port 8000
 
 # 前端（需要 Node 22+）
 cd frontend
@@ -64,16 +95,16 @@ npm run dev    # Vite dev server，自动代理 /api → :8000
 
 ### 支持的厂商
 
-| 厂商 | MVP | V0.5 | 说明 |
-|------|-----|------|------|
-| Groq | ✅ | | 全部模型永久免费 |
-| SiliconFlow（硅基流动） | ✅ | | 部分模型永久免费 |
-| Google Gemini | ✅ | | 免费配额（1500 RPD） |
-| DeepSeek | | ✅ | |
-| Cloudflare Workers AI | | ✅ | |
-| 智谱 GLM | | ✅ | |
+| 厂商 | 状态 | 免费模型 | 说明 |
+|------|------|---------|------|
+| Groq | ✅ | 全部 | 永久免费 |
+| SiliconFlow（硅基流动） | ✅ | 10+ | 部分模型永久免费 |
+| Google Gemini | ✅ | 9 | 免费配额 |
+| OpenRouter | ✅ | 29+ | 聚合平台，自动检测免费模型 |
+| DeepSeek | 📋 | | 计划中 |
+| Cloudflare Workers AI | 📋 | | 计划中 |
 
-新增厂商只需实现一个 Adapter 文件 + 白名单加一节，见 [`backend/adapters/`](./backend/adapters/)。
+新增厂商只需实现一个 Adapter 文件，见 [`backend/adapters/`](./backend/adapters/)。
 
 ### 技术栈
 
@@ -88,8 +119,8 @@ npm run dev    # Vite dev server，自动代理 /api → :8000
 
 ```
 backend/
-  adapters/     # 厂商适配器（Groq / SiliconFlow / Gemini）
-  api/          # REST API 路由
+  adapters/     # 厂商适配器（Groq / SiliconFlow / Gemini / OpenRouter）
+  api/          # REST API + OpenAI 兼容代理
   models/       # 数据库模型
   services/     # 核心业务逻辑（发现、探测、加密、调度）
 frontend/
@@ -99,14 +130,15 @@ frontend/
     hooks/      # WebSocket hook
 whitelist/
   providers.yaml # 免费模型白名单
+docker/
+  Dockerfile    # 多阶段构建
 ```
 
 ### 路线图
 
-- **V0.1 MVP** ✅ — Key 管理 + 自动发现 + 算力池 Dashboard
-- **V0.5** — 定时自动探测 + 更多厂商
-- **V1.0** — OpenAI 兼容代理接口 + SSE 流式透传 + 调用统计
-- **V2.0** — 智能路由 + 额度预测告警
+- **V0.1 MVP** ✅ — Key 管理 + 自动发现 + 算力池 Dashboard + Docker 部署
+- **V0.5** ✅ — OpenAI 兼容代理 + 安全加固 + 更多厂商（OpenRouter）
+- **V1.0** — 调用统计 + 智能路由 + 额度预测告警
 
 ### License
 
@@ -146,10 +178,31 @@ cd available-computing
 
 mkdir -p secrets
 echo "your-secure-password" > secrets/admin_password.txt
+python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(32))"
 
 docker compose up -d
 # Open http://localhost:8080
 ```
+
+### OpenAI-Compatible Proxy
+
+After adding providers, use OpenAI SDK to call all free models through a single endpoint:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="your-jwt-token",
+    base_url="http://localhost:8080/v1"
+)
+
+client.chat.completions.create(
+    model="gemini-2.5-flash",
+    messages=[{"role": "user", "content": "Hello"}]
+)
+```
+
+Supports streaming (SSE) and non-streaming. Passive health data is recorded automatically.
 
 ### Development
 
@@ -157,7 +210,9 @@ docker compose up -d
 # Backend (Python 3.12+)
 cd backend
 pip install -r requirements.txt
-ADMIN_PASSWORD=dev uvicorn main:app --reload --port 8000
+export JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+export ADMIN_PASSWORD=dev
+uvicorn main:app --reload --port 8000
 
 # Frontend (Node 22+)
 cd frontend
@@ -167,16 +222,16 @@ npm run dev
 
 ### Supported Providers
 
-| Provider | MVP | V0.5 | Notes |
-|----------|-----|------|-------|
-| Groq | ✅ | | All models permanently free |
-| SiliconFlow | ✅ | | Select models permanently free |
-| Google Gemini | ✅ | | Free quota (1,500 RPD) |
-| DeepSeek | | ✅ | |
-| Cloudflare Workers AI | | ✅ | |
-| Zhipu GLM | | ✅ | |
+| Provider | Status | Free Models | Notes |
+|----------|--------|-------------|-------|
+| Groq | ✅ | All | Permanently free |
+| SiliconFlow | ✅ | 10+ | Select models permanently free |
+| Google Gemini | ✅ | 9 | Free quota |
+| OpenRouter | ✅ | 29+ | Aggregator, auto-detects free models |
+| DeepSeek | 📋 | | Planned |
+| Cloudflare Workers AI | 📋 | | Planned |
 
-Adding a new provider = implement one Adapter file + add a section to the whitelist. See [`backend/adapters/`](./backend/adapters/).
+Adding a new provider = implement one Adapter file. See [`backend/adapters/`](./backend/adapters/).
 
 ### Tech Stack
 
@@ -189,10 +244,9 @@ Adding a new provider = implement one Adapter file + add a section to the whitel
 
 ### Roadmap
 
-- **V0.1 MVP** ✅ — Key management + auto-discovery + pool dashboard
-- **V0.5** — Scheduled auto-probing + more providers
-- **V1.0** — OpenAI-compatible proxy + SSE streaming + call statistics
-- **V2.0** — Smart routing + quota prediction & alerts
+- **V0.1 MVP** ✅ — Key management + auto-discovery + pool dashboard + Docker deploy
+- **V0.5** ✅ — OpenAI-compatible proxy + security hardening + more providers (OpenRouter)
+- **V1.0** — Call statistics + smart routing + quota prediction & alerts
 
 ### License
 
