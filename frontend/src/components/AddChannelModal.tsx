@@ -24,6 +24,11 @@ const PROVIDER_INFO: Record<string, { hint: string; url: string; desc: string }>
     hint: 'Google AI Studio → Get API key',
     url: 'https://aistudio.google.com/app/apikey',
   },
+  openrouter: {
+    desc: '29+ 个免费模型',
+    hint: 'OpenRouter → Keys → Create Key',
+    url: 'https://openrouter.ai/settings/keys',
+  },
 }
 
 export default function AddChannelModal({ open, onClose, onCreated }: Props) {

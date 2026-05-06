@@ -2,6 +2,7 @@ from .base import ProviderAdapter
 from .groq import GroqAdapter
 from .siliconflow import SiliconFlowAdapter
 from .gemini import GeminiAdapter
+from .openrouter import OpenRouterAdapter
 
 _registry: dict[str, ProviderAdapter] = {}
 
@@ -13,6 +14,7 @@ def _register(adapter: ProviderAdapter):
 _register(GroqAdapter())
 _register(SiliconFlowAdapter())
 _register(GeminiAdapter())
+_register(OpenRouterAdapter())
 
 
 def get_adapter(provider_id: str) -> ProviderAdapter:
