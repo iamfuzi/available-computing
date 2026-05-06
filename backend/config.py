@@ -12,10 +12,14 @@ WHITELIST_PATH = Path(os.environ.get(
     str(Path(__file__).parent.parent / "whitelist" / "providers.yaml"),
 ))
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "")
+_jwt_secret_file = os.environ.get("JWT_SECRET_FILE")
+if _jwt_secret_file and Path(_jwt_secret_file).exists():
+    JWT_SECRET = Path(_jwt_secret_file).read_text().strip()
+else:
+    JWT_SECRET = os.environ.get("JWT_SECRET", "")
 if not JWT_SECRET:
     raise RuntimeError(
-        "JWT_SECRET environment variable is required. "
+        "JWT_SECRET is required. Set JWT_SECRET or JWT_SECRET_FILE env var. "
         "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
     )
 JWT_ALGORITHM = "HS256"

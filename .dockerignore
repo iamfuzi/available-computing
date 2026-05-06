@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+node_modules
+backend/data
+backend/static
+frontend/node_modules
+frontend/dist
+data
+secrets
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
