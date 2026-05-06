@@ -6,6 +6,7 @@ from pathlib import Path
 
 from database import create_db_and_tables
 from api import auth, channels, models, pool, settings
+from api.proxy import router as proxy_router
 from ws.events import router as ws_router
 from services.scheduler import init_scheduler, shutdown_scheduler
 
@@ -54,6 +55,9 @@ app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"]
 
 # WebSocket
 app.include_router(ws_router)
+
+# OpenAI-compatible proxy
+app.include_router(proxy_router, prefix="/v1", tags=["proxy"])
 
 # Serve frontend static files in production
 static_dir = Path(__file__).parent / "static"
