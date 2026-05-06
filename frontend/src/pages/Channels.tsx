@@ -7,9 +7,15 @@ export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([])
   const [showAddModal, setShowAddModal] = useState(false)
   const [probingId, setProbingId] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
 
   async function load() {
-    setChannels(await channelsApi.list())
+    setLoading(true)
+    try {
+      setChannels(await channelsApi.list())
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => { load() }, [])
@@ -32,70 +38,99 @@ export default function Channels() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-4xl mx-auto px-4 py-6 space-y-4">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold text-gray-900">🔌 厂商管理</h1>
+    <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-bold text-gray-900">厂商管理</h1>
+          <p className="text-xs text-gray-400 mt-0.5">管理你的 API Key 和接入状态</p>
+        </div>
+        <button
+          onClick={() => setShowAddModal(true)}
+          className="bg-gray-900 text-white text-sm px-4 py-2 rounded-xl hover:bg-gray-800 transition-colors"
+        >
+          ＋ 添加厂商
+        </button>
+      </div>
+
+      {loading && channels.length === 0 ? (
+        <div className="text-center py-20 text-gray-400 text-sm animate-pulse">加载中...</div>
+      ) : channels.length === 0 ? (
+        <div className="bg-white border border-dashed border-gray-300 rounded-2xl p-12 text-center space-y-3">
+          <div className="text-3xl">🔌</div>
+          <p className="text-gray-500">还没有接入任何厂商</p>
           <button
             onClick={() => setShowAddModal(true)}
-            className="bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700"
+            className="text-sm text-blue-600 hover:text-blue-800"
           >
-            ＋ 添加厂商
+            添加第一个厂商 →
           </button>
         </div>
-
-        {channels.length === 0 && (
-          <div className="bg-white border border-gray-200 rounded-2xl p-10 text-center text-gray-400">
-            还没有接入任何厂商
-          </div>
-        )}
-
-        {channels.map((ch) => (
-          <div key={ch.id} className={`bg-white border rounded-xl p-4 space-y-2 ${ch.enabled ? 'border-gray-200' : 'border-gray-100 opacity-60'}`}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${ch.enabled ? 'bg-green-500' : 'bg-gray-300'}`} />
-                <span className="font-medium text-gray-900">{ch.name}</span>
-                <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded">{ch.provider_type}</span>
+      ) : (
+        <div className="space-y-3">
+          {channels.map((ch) => (
+            <div
+              key={ch.id}
+              className={`bg-white border rounded-xl p-4 space-y-3 transition-opacity ${
+                ch.enabled ? 'border-gray-200 shadow-sm' : 'border-gray-100 opacity-50'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className={`w-2 h-2 rounded-full ${ch.enabled ? 'bg-green-500' : 'bg-gray-300'}`} />
+                  <span className="font-semibold text-gray-900">{ch.name}</span>
+                  <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                    {ch.provider_type}
+                  </span>
+                </div>
+                {ch.free_model_count > 0 ? (
+                  <span className="text-sm font-medium text-green-700 bg-green-50 px-2.5 py-0.5 rounded-full">
+                    {ch.free_model_count} 个免费模型
+                  </span>
+                ) : (
+                  <span className="text-xs text-gray-400 animate-pulse">探测中...</span>
+                )}
               </div>
-              <span className="text-sm text-blue-700 font-medium">
-                {ch.free_model_count > 0 ? `🟢 ${ch.free_model_count} 个免费模型` : '探测中...'}
-              </span>
-            </div>
 
-            <div className="flex items-center justify-between text-sm text-gray-500">
-              <span>API Key: {ch.api_key_hint}</span>
-              <span className="text-xs">
-                {ch.last_probed_at
-                  ? `最后探测: ${new Date(ch.last_probed_at).toLocaleString()}`
-                  : '尚未探测'}
-              </span>
-            </div>
+              <div className="flex items-center justify-between text-sm text-gray-500">
+                <code className="bg-gray-50 text-gray-600 px-2 py-0.5 rounded text-xs font-mono">
+                  {ch.api_key_hint}
+                </code>
+                <span className="text-xs">
+                  {ch.last_probed_at
+                    ? `探测于 ${new Date(ch.last_probed_at).toLocaleString()}`
+                    : '尚未探测'}
+                </span>
+              </div>
 
-            <div className="flex gap-2 pt-1">
-              <button
-                onClick={() => handleProbe(ch.id)}
-                disabled={probingId === ch.id}
-                className="text-xs border border-gray-200 px-3 py-1 rounded-lg hover:bg-gray-50 disabled:opacity-50"
-              >
-                {probingId === ch.id ? '探测中...' : '刷新'}
-              </button>
-              <button
-                onClick={() => handleToggle(ch)}
-                className="text-xs border border-gray-200 px-3 py-1 rounded-lg hover:bg-gray-50"
-              >
-                {ch.enabled ? '禁用' : '启用'}
-              </button>
-              <button
-                onClick={() => handleDelete(ch.id)}
-                className="text-xs border border-red-200 text-red-600 px-3 py-1 rounded-lg hover:bg-red-50"
-              >
-                删除
-              </button>
+              <div className="flex gap-2 pt-1 border-t border-gray-50">
+                <button
+                  onClick={() => handleProbe(ch.id)}
+                  disabled={probingId === ch.id}
+                  className="text-xs border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                >
+                  {probingId === ch.id ? '探测中...' : '🔄 刷新'}
+                </button>
+                <button
+                  onClick={() => handleToggle(ch)}
+                  className={`text-xs border px-3 py-1.5 rounded-lg transition-colors ${
+                    ch.enabled
+                      ? 'border-gray-200 hover:bg-gray-50'
+                      : 'border-green-200 text-green-700 hover:bg-green-50'
+                  }`}
+                >
+                  {ch.enabled ? '禁用' : '启用'}
+                </button>
+                <button
+                  onClick={() => handleDelete(ch.id)}
+                  className="text-xs border border-transparent text-gray-400 hover:text-red-600 hover:border-red-200 px-3 py-1.5 rounded-lg transition-colors ml-auto"
+                >
+                  删除
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       <AddChannelModal
         open={showAddModal}

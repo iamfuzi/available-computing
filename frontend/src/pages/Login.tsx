@@ -24,25 +24,36 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8 w-full max-w-sm space-y-5">
-        <h1 className="text-xl font-semibold text-gray-900 text-center">Available Computing</h1>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="访问密码"
-          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400"
-          autoFocus
-        />
-        {error && <p className="text-sm text-red-600 text-center">{error}</p>}
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-blue-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
-        >
-          {loading ? '验证中...' : '进入'}
-        </button>
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-50 to-gray-100">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-6">
+        <div className="text-center space-y-1">
+          <div className="text-3xl">⚡</div>
+          <h1 className="text-xl font-bold text-gray-900">Available Computing</h1>
+          <p className="text-sm text-gray-400">聚合你的免费 AI 算力</p>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 space-y-4">
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="输入访问密码"
+            className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 transition-shadow"
+            autoFocus
+          />
+          {error && <p className="text-sm text-red-600 text-center">{error}</p>}
+          <button
+            type="submit"
+            disabled={loading || !password}
+            className="w-full bg-gray-900 text-white rounded-xl py-2.5 text-sm font-medium hover:bg-gray-800 disabled:opacity-40 transition-colors"
+          >
+            {loading ? '验证中...' : '进入'}
+          </button>
+        </div>
+
+        <p className="text-center text-xs text-gray-300">
+          自托管 · Key 本地加密 · 不上云
+        </p>
       </form>
     </div>
   )

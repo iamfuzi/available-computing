@@ -13,28 +13,66 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
 function Layout({ children }: { children: React.ReactNode }) {
   const linkClass = ({ isActive }: { isActive: boolean }) =>
-    `text-sm px-3 py-2 rounded-lg transition-colors ${isActive ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-100'}`
+    `flex items-center gap-2 text-sm px-3 py-2 rounded-lg transition-colors ${
+      isActive
+        ? 'bg-blue-600 text-white shadow-sm'
+        : 'text-gray-600 hover:bg-gray-100'
+    }`
 
   return (
-    <div className="min-h-screen bg-gray-50 flex">
-      {/* Sidebar */}
-      <aside className="w-48 bg-white border-r border-gray-200 flex flex-col py-4 px-3 gap-1 shrink-0">
-        <div className="text-sm font-semibold text-gray-900 px-3 py-2 mb-2">
-          ⚡ Available Computing
+    <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row">
+      {/* Desktop sidebar */}
+      <aside className="hidden md:flex w-52 bg-white border-r border-gray-200 flex-col py-5 px-3 gap-1 shrink-0 sticky top-0 h-screen">
+        <div className="px-3 mb-6">
+          <div className="text-base font-bold text-gray-900">⚡ Available</div>
+          <div className="text-xs text-gray-400 -mt-0.5">Computing</div>
         </div>
-        <NavLink to="/" end className={linkClass}>📊 算力池</NavLink>
-        <NavLink to="/channels" className={linkClass}>🔌 厂商管理</NavLink>
-        <NavLink to="/settings" className={linkClass}>⚙️ 设置</NavLink>
-        <div className="mt-auto">
+        <nav className="flex flex-col gap-1">
+          <NavLink to="/" end className={linkClass}>
+            <span>📊</span><span>算力池</span>
+          </NavLink>
+          <NavLink to="/channels" className={linkClass}>
+            <span>🔌</span><span>厂商管理</span>
+          </NavLink>
+          <NavLink to="/settings" className={linkClass}>
+            <span>⚙️</span><span>设置</span>
+          </NavLink>
+        </nav>
+        <div className="mt-auto px-1">
           <button
             onClick={() => { localStorage.removeItem('token'); window.location.href = '/login' }}
-            className="text-xs text-gray-400 hover:text-gray-600 px-3 py-2"
+            className="text-xs text-gray-400 hover:text-red-500 transition-colors px-2 py-1"
           >
             退出登录
           </button>
         </div>
       </aside>
-      <main className="flex-1 overflow-auto">{children}</main>
+
+      {/* Mobile bottom nav */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 flex z-40">
+        {[
+          { to: '/', end: true, icon: '📊', label: '算力池' },
+          { to: '/channels', icon: '🔌', label: '厂商' },
+          { to: '/settings', icon: '⚙️', label: '设置' },
+        ].map((item) => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={({ isActive }) =>
+              `flex-1 flex flex-col items-center py-2 text-xs transition-colors ${
+                isActive ? 'text-blue-600' : 'text-gray-400'
+              }`
+            }
+          >
+            <span className="text-lg">{item.icon}</span>
+            <span>{item.label}</span>
+          </NavLink>
+        ))}
+      </nav>
+
+      {/* Main content with bottom padding on mobile for nav */}
+      <main className="flex-1 overflow-auto pb-20 md:pb-0">{children}</main>
     </div>
   )
 }

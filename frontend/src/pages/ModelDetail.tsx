@@ -5,18 +5,49 @@ import type { ModelRow, HealthRecord } from '../api/client'
 import HealthBadge from '../components/HealthBadge'
 import FreeTypeBadge from '../components/FreeTypeBadge'
 
-const TABS = ['cURL', 'Python', 'Node.js']
+const TABS = ['cURL', 'Python', 'Node.js'] as const
+type Tab = typeof TABS[number]
 
-function buildExample(m: ModelRow, tab: string): string {
+function buildExample(m: ModelRow, tab: Tab): string {
   const base = m.base_url || ''
-  const key = m.provider_name ? '••••[你的Key后4位]' : '<your-key>'
+  const key = '••••[你的Key后4位]'
   if (tab === 'cURL') {
-    return `curl ${base}/chat/completions \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model":"${m.model_id}","messages":[{"role":"user","content":"Hello"}],"stream":true}'`
+    return `curl ${base}/chat/completions \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"${m.model_id}","messages":[{"role":"user","content":"Hello"}],"stream":true}'`
   }
   if (tab === 'Python') {
-    return `from openai import OpenAI\n\nclient = OpenAI(\n    api_key="${key}",\n    base_url="${base}",\n)\n\nstream = client.chat.completions.create(\n    model="${m.model_id}",\n    messages=[{"role":"user","content":"Hello"}],\n    stream=True,\n)\nfor chunk in stream:\n    print(chunk.choices[0].delta.content or "", end="")`
+    return `from openai import OpenAI
+
+client = OpenAI(api_key="${key}", base_url="${base}")
+
+stream = client.chat.completions.create(
+    model="${m.model_id}",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")`
   }
-  return `import OpenAI from "openai";\n\nconst client = new OpenAI({\n  apiKey: "${key}",\n  baseURL: "${base}",\n});\n\nconst stream = await client.chat.completions.create({\n  model: "${m.model_id}",\n  messages: [{ role: "user", content: "Hello" }],\n  stream: true,\n});\nfor await (const chunk of stream) {\n  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");\n}`
+  return `import OpenAI from "openai";
+
+const client = new OpenAI({ apiKey: "${key}", baseURL: "${base}" });
+
+const stream = await client.chat.completions.create({
+  model: "${m.model_id}",
+  messages: [{ role: "user", content: "Hello" }],
+  stream: true,
+});
+for await (const chunk of stream) {
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? "");`
+}
+
+const STATUS_COLOR: Record<string, string> = {
+  healthy: '#22c55e',
+  slow: '#eab308',
+  down: '#ef4444',
+  unknown: '#9ca3af',
 }
 
 export default function ModelDetail() {
@@ -24,17 +55,25 @@ export default function ModelDetail() {
   const navigate = useNavigate()
   const [model, setModel] = useState<ModelRow | null>(null)
   const [history, setHistory] = useState<HealthRecord[]>([])
-  const [tab, setTab] = useState('cURL')
+  const [tab, setTab] = useState<Tab>('cURL')
   const [copied, setCopied] = useState(false)
   const [period, setPeriod] = useState<'24h' | '7d'>('24h')
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     if (!id) return
-    modelsApi.get(id).then(setModel)
-    modelsApi.healthHistory(id, period).then(setHistory)
+    setLoading(true)
+    Promise.all([
+      modelsApi.get(id),
+      modelsApi.healthHistory(id, period),
+    ]).then(([m, h]) => {
+      setModel(m)
+      setHistory(h)
+    }).finally(() => setLoading(false))
   }, [id, period])
 
-  if (!model) return <div className="p-8 text-gray-400">加载中...</div>
+  if (loading && !model) return <div className="p-8 text-gray-400 text-sm animate-pulse">加载中...</div>
+  if (!model) return null
 
   const rateLimit = model.rate_limit ? JSON.parse(model.rate_limit) : null
 
@@ -45,113 +84,164 @@ export default function ModelDetail() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
-        <button onClick={() => navigate(-1)} className="text-sm text-gray-500 hover:text-gray-700">← 返回</button>
+    <div className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+      <button
+        onClick={() => navigate(-1)}
+        className="text-sm text-gray-400 hover:text-gray-700 transition-colors"
+      >
+        ← 返回
+      </button>
 
-        <div className="bg-white border border-gray-200 rounded-2xl p-6 space-y-4">
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900">{model.model_id}</h1>
-            <p className="text-sm text-gray-500 mt-1">
-              来自 {model.provider_name} · {model.category} ·{' '}
-              {model.context_length ? `上下文 ${Math.round(model.context_length / 1000)}K` : ''}
+      {/* Header card */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold text-gray-900 truncate">{model.model_id}</h1>
+            <p className="text-sm text-gray-400 mt-0.5">
+              {model.provider_name} · {model.category}
+              {model.context_length ? ` · 上下文 ${Math.round(model.context_length / 1000)}K` : ''}
             </p>
           </div>
-
-          <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex items-center gap-2 shrink-0">
             <HealthBadge status={model.health_status} responseMs={model.last_response_ms} />
-            <FreeTypeBadge freeType={model.free_type} source={model.free_source} />
           </div>
+        </div>
 
-          <div className="text-sm space-y-1 text-gray-600">
-            <div><span className="text-gray-400">模型 ID:</span> <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{model.model_id}</code></div>
-            <div><span className="text-gray-400">Endpoint:</span> <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{model.base_url}</code></div>
-            {rateLimit && (
-              <div>
-                <span className="text-gray-400">速率限制:</span>{' '}
-                {Object.entries(rateLimit).map(([k, v]) => `${v} ${k.toUpperCase()}`).join(' / ')}
+        <div className="flex items-center gap-2 flex-wrap">
+          <FreeTypeBadge freeType={model.free_type} source={model.free_source} />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+          <div className="bg-gray-50 rounded-xl p-3 space-y-1.5">
+            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">模型信息</div>
+            <div className="text-gray-600">
+              <span className="text-gray-400 text-xs">ID</span>{' '}
+              <code className="bg-white px-1.5 py-0.5 rounded text-xs font-mono">{model.model_id}</code>
+            </div>
+            {model.base_url && (
+              <div className="text-gray-600 truncate">
+                <span className="text-gray-400 text-xs">Endpoint</span>{' '}
+                <code className="bg-white px-1.5 py-0.5 rounded text-xs font-mono">{model.base_url}</code>
+              </div>
+            )}
+            {model.free_source && (
+              <div className="text-gray-600">
+                <span className="text-gray-400 text-xs">免费判定</span> {model.free_source}
+              </div>
+            )}
+          </div>
+          <div className="bg-gray-50 rounded-xl p-3 space-y-1.5">
+            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">速率限制</div>
+            {rateLimit ? (
+              <>
+                <div className="text-gray-600">
+                  {Object.entries(rateLimit).map(([k, v]) => (
+                    <span key={k} className="inline-block mr-3">
+                      <span className="text-gray-900 font-medium">{String(v)}</span>{' '}
+                      <span className="text-gray-400 text-xs">{k.toUpperCase()}</span>
+                    </span>
+                  ))}
+                </div>
                 {model.rate_limit_source && (
-                  <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${
+                  <span className={`inline-block text-xs px-2 py-0.5 rounded-full ${
                     model.rate_limit_source === 'observed'
-                      ? 'bg-green-50 text-green-700'
+                      ? 'bg-green-50 text-green-600'
                       : 'bg-gray-100 text-gray-500'
                   }`}>
                     {model.rate_limit_source === 'observed' ? '实时采集' : '人工录入'}
                   </span>
                 )}
                 {model.rate_limit_updated_at && (
-                  <span className="ml-1 text-xs text-gray-400">
-                    更新于 {new Date(model.rate_limit_updated_at).toLocaleDateString()}
+                  <span className="text-xs text-gray-400 ml-1">
+                    {new Date(model.rate_limit_updated_at).toLocaleDateString()}
                   </span>
                 )}
-              </div>
-            )}
-            {model.free_source && (
-              <div><span className="text-gray-400">免费判定来源:</span> {model.free_source}</div>
+              </>
+            ) : (
+              <div className="text-gray-400 text-sm">暂无数据</div>
             )}
           </div>
         </div>
+      </div>
 
-        {/* Health history */}
-        <div className="bg-white border border-gray-200 rounded-2xl p-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="font-medium text-gray-900">📈 健康历史</h2>
-            <div className="flex gap-1">
-              {(['24h', '7d'] as const).map((p) => (
-                <button
-                  key={p}
-                  onClick={() => setPeriod(p)}
-                  className={`text-xs px-3 py-1 rounded ${period === p ? 'bg-blue-600 text-white' : 'border border-gray-200 text-gray-600'}`}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          </div>
-          {history.length === 0 ? (
-            <p className="text-sm text-gray-400">暂无健康记录</p>
-          ) : (
-            <div className="flex gap-0.5 h-10 items-end">
-              {history.slice(-60).map((r, i) => (
-                <div
-                  key={i}
-                  title={`${r.checked_at}: ${r.status} ${r.response_ms ? r.response_ms + 'ms' : ''}`}
-                  className={`flex-1 rounded-sm ${
-                    r.status === 'healthy' ? 'bg-green-400' :
-                    r.status === 'slow' ? 'bg-yellow-400' :
-                    r.status === 'down' ? 'bg-red-400' : 'bg-gray-200'
-                  }`}
-                  style={{ height: r.response_ms ? `${Math.min(100, (r.response_ms / 3000) * 100)}%` : '20%' }}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Code example */}
-        <div className="bg-white border border-gray-200 rounded-2xl p-6 space-y-3">
-          <h2 className="font-medium text-gray-900">🚀 快速调用</h2>
-          <div className="flex gap-1">
-            {TABS.map((t) => (
+      {/* Health history */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">健康历史</h2>
+          <div className="flex bg-gray-100 rounded-lg p-0.5">
+            {(['24h', '7d'] as const).map((p) => (
               <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`text-xs px-3 py-1 rounded ${tab === t ? 'bg-blue-600 text-white' : 'border border-gray-200 text-gray-600'}`}
+                key={p}
+                onClick={() => setPeriod(p)}
+                className={`text-xs px-3 py-1 rounded-md transition-colors ${
+                  period === p ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                }`}
               >
-                {t}
+                {p}
               </button>
             ))}
           </div>
-          <pre className="bg-gray-950 text-gray-100 text-xs rounded-xl p-4 overflow-x-auto leading-relaxed whitespace-pre-wrap">
-            {buildExample(model, tab)}
-          </pre>
+        </div>
+        {history.length === 0 ? (
+          <p className="text-sm text-gray-400 py-4 text-center">暂无健康记录，将在探测后生成</p>
+        ) : (
+          <div className="flex gap-[2px] h-12 items-end rounded-lg overflow-hidden bg-gray-50 p-1">
+            {history.slice(-80).map((r, i) => (
+              <div
+                key={i}
+                title={`${new Date(r.checked_at).toLocaleTimeString()}: ${r.status}${r.response_ms ? ` ${r.response_ms}ms` : ''}`}
+                className="flex-1 rounded-sm transition-opacity hover:opacity-80"
+                style={{
+                  backgroundColor: STATUS_COLOR[r.status] ?? STATUS_COLOR.unknown,
+                  height: r.response_ms
+                    ? `${Math.max(8, Math.min(100, (r.response_ms / 3000) * 100))}%`
+                    : '15%',
+                }}
+              />
+            ))}
+          </div>
+        )}
+        {history.length > 0 && (
+          <div className="flex gap-4 text-xs text-gray-400">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /> 健康</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500" /> 慢</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> 异常</span>
+            <span className="ml-auto">{history.length} 条记录</span>
+          </div>
+        )}
+      </div>
+
+      {/* Code example */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">快速调用</h2>
           <button
             onClick={copyExample}
-            className="text-sm text-blue-600 hover:text-blue-800"
+            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+              copied
+                ? 'bg-green-50 text-green-700'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
           >
-            {copied ? '✓ 已复制' : '📋 复制（含完整 Key）'}
+            {copied ? '✓ 已复制' : '📋 复制'}
           </button>
         </div>
+        <div className="flex bg-gray-900 rounded-lg p-0.5 gap-0.5">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`text-xs px-3 py-1.5 rounded-md transition-colors ${
+                tab === t ? 'bg-gray-700 text-white' : 'text-gray-500'
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <pre className="bg-gray-950 text-gray-300 text-xs rounded-xl p-4 overflow-x-auto leading-relaxed whitespace-pre-wrap font-mono">
+          {buildExample(model, tab)}
+        </pre>
       </div>
     </div>
   )
