@@ -47,41 +47,46 @@ providers:
   gemini:
     free_strategy: whitelist
     free_models:
-      - id: "gemini-2.0-flash"
+      - id: "gemini-2.5-flash"
         free_type: quota
         rate_limit:
-          rpm: 15
+          rpm: 10
+          rpd: 500
+          tpm: 250000
+        notes: "免费额度，超出后按量计费"
+      - id: "gemini-2.5-pro"
+        free_type: quota
+        rate_limit:
+          rpm: 5
+          rpd: 25
+          tpm: 250000
+      - id: "gemini-2.5-flash-lite"
+        free_type: quota
+        rate_limit:
+          rpm: 30
           rpd: 1500
-          tpm: 1000000
-        notes: "每天 1500 次请求免费，超出后按量计费"
-      - id: "gemini-2.0-flash-lite"
+      - id: "gemini-3-flash-preview"
+        free_type: quota
+        rate_limit:
+          rpm: 10
+          rpd: 500
+      - id: "gemini-3-pro-preview"
+        free_type: quota
+        rate_limit:
+          rpm: 5
+          rpd: 25
+      - id: "gemini-3.1-flash-lite-preview"
         free_type: quota
         rate_limit:
           rpm: 30
           rpd: 1500
-      - id: "gemini-1.5-flash"
+      - id: "gemma-4-26b-a4b-it"
         free_type: quota
         rate_limit:
           rpm: 15
           rpd: 1500
-          tpm: 1000000
-      - id: "gemini-1.5-flash-8b"
+      - id: "gemma-4-31b-it"
         free_type: quota
         rate_limit:
           rpm: 15
           rpd: 1500
-      - id: "gemma-3-27b-it"
-        free_type: quota
-        rate_limit:
-          rpm: 15
-          rpd: 1500
-      - id: "gemma-3-12b-it"
-        free_type: quota
-        rate_limit:
-          rpm: 15
-          rpd: 1500
-      - id: "gemma-3-4b-it"
-        free_type: quota
-        rate_limit:
-          rpm: 30
-          rpd: 14400
