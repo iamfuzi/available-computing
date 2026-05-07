@@ -29,6 +29,11 @@ const PROVIDER_INFO: Record<string, { hint: string; url: string; desc: string }>
     hint: 'OpenRouter → Keys → Create Key',
     url: 'https://openrouter.ai/settings/keys',
   },
+  zhipu: {
+    desc: '7+ 个免费模型 (GLM-4 等)',
+    hint: '智谱开放平台 → API 密钥 → 添加新 API Key',
+    url: 'https://open.bigmodel.cn/user-center/apikeys',
+  },
 }
 
 export default function AddChannelModal({ open, onClose, onCreated }: Props) {

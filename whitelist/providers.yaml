@@ -1,5 +1,5 @@
-version: "2026.05.06"
-updated_at: "2026-05-06"
+version: "2026.05.07"
+updated_at: "2026-05-07"
 
 providers:
   groq:
@@ -90,3 +90,32 @@ providers:
         rate_limit:
           rpm: 15
           rpd: 1500
+
+  zhipu:
+    free_strategy: whitelist
+    free_models:
+      - id: "glm-4.7-flash"
+        free_type: permanent
+        notes: "200K 上下文，免费"
+      - id: "glm-4-flash"
+        free_type: permanent
+        notes: "128K 上下文，免费"
+      - id: "glm-z1-flash"
+        free_type: permanent
+        notes: "推理模型，免费"
+      - id: "glm-4.6v-flash"
+        free_type: permanent
+        category: vision
+        notes: "多图理解，免费"
+      - id: "glm-4v-flash"
+        free_type: permanent
+        category: vision
+        notes: "单图理解，免费"
+      - id: "cogviewx-flash"
+        free_type: permanent
+        category: image
+        notes: "视频生成，免费"
+      - id: "cogview-3-flash"
+        free_type: permanent
+        category: image
+        notes: "图像生成，免费"
