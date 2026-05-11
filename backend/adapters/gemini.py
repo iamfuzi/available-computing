@@ -83,8 +83,8 @@ class GeminiAdapter(ProviderAdapter):
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         url = _GEMINI_CHAT_URL.format(model=model_id)
         payload = {
-            "contents": [{"parts": [{"text": "hi"}]}],
-            "generationConfig": {"maxOutputTokens": 1},
+            "contents": [{"parts": [{"text": "你是什么模型"}]}],
+            "generationConfig": {"maxOutputTokens": 20},
         }
         start = time.monotonic()
         try:
@@ -98,6 +98,19 @@ class GeminiAdapter(ProviderAdapter):
         response_ms = int((time.monotonic() - start) * 1000)
 
         if r.status_code == 200:
+            try:
+                text = ""
+                for candidate in r.json()["candidates"]:
+                    for part in candidate.get("content", {}).get("parts", []):
+                        if "text" in part:
+                            text = part["text"]
+                            break
+                    if text:
+                        break
+                if not text or not text.strip():
+                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            except (KeyError, IndexError, TypeError):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(
                 status=status, response_ms=response_ms,

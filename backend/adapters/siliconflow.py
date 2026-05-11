@@ -8,6 +8,8 @@ from services.rate_limit import parse_rate_limit_headers, parse_remaining_header
 
 def _infer_category(model_id: str) -> str:
     lower = model_id.lower()
+    if "rerank" in lower:
+        return "rerank"
     if any(k in lower for k in ("embedding", "bge", "e5")):
         return "embedding"
     if any(k in lower for k in ("vision", "vl", "internvl", "qwen-vl")):
@@ -43,31 +45,36 @@ class SiliconFlowAdapter(ProviderAdapter):
 
     async def list_models(self, key: str, base_url: str) -> list[ModelInfo]:
         models = []
-        page = 1
+        seen = set()
         async with httpx.AsyncClient(timeout=15) as client:
-            while True:
-                r = await client.get(
-                    f"{base_url}/models",
-                    headers={"Authorization": f"Bearer {key}"},
-                    params={"page": page, "page_size": 100, "type": "text"},
-                )
-                r.raise_for_status()
-                data = r.json()
-                items = data.get("data", [])
-                if not items:
-                    break
-                for m in items:
-                    model_id = m.get("id", "")
-                    models.append(ModelInfo(
-                        model_id=model_id,
-                        display_name=m.get("name", model_id),
-                        category=_infer_category(model_id),
-                        context_length=m.get("context_length"),
-                        raw=m,
-                    ))
-                if len(items) < 100:
-                    break
-                page += 1
+            for model_type in ("text", "embedding", "rerank"):
+                page = 1
+                while True:
+                    r = await client.get(
+                        f"{base_url}/models",
+                        headers={"Authorization": f"Bearer {key}"},
+                        params={"page": page, "page_size": 100, "type": model_type},
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    items = data.get("data", [])
+                    if not items:
+                        break
+                    for m in items:
+                        model_id = m.get("id", "")
+                        if model_id in seen:
+                            continue
+                        seen.add(model_id)
+                        models.append(ModelInfo(
+                            model_id=model_id,
+                            display_name=m.get("name", model_id),
+                            category=_infer_category(model_id),
+                            context_length=m.get("context_length"),
+                            raw=m,
+                        ))
+                    if len(items) < 100:
+                        break
+                    page += 1
         return models
 
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
@@ -82,10 +89,78 @@ class SiliconFlowAdapter(ProviderAdapter):
         return None
 
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
+        cat = _infer_category(model_id)
+        if cat == "embedding":
+            return await self._health_check_embedding(model_id, key, base_url)
+        if cat == "rerank":
+            return await self._health_check_rerank(model_id, key, base_url)
+        return await self._health_check_chat(model_id, key, base_url)
+
+    async def _health_check_embedding(self, model_id: str, key: str, base_url: str) -> HealthInfo:
+        payload = {"model": model_id, "input": "hello"}
+        start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+                r = await client.post(
+                    f"{base_url}/embeddings",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=payload,
+                )
+        except httpx.TimeoutException:
+            return HealthInfo(status="down", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+        except httpx.RequestError:
+            return HealthInfo(status="down", response_ms=0, error_code="network_error")
+        response_ms = int((time.monotonic() - start) * 1000)
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                if not data.get("data") or not data["data"][0].get("embedding"):
+                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            except (KeyError, IndexError, TypeError):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
+            return HealthInfo(status=status, response_ms=response_ms)
+        if r.status_code == 429:
+            return HealthInfo(status="down", response_ms=response_ms, error_code="rate_limited")
+        if r.status_code in (401, 403):
+            return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
+        return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
+
+    async def _health_check_rerank(self, model_id: str, key: str, base_url: str) -> HealthInfo:
+        payload = {"model": model_id, "query": "hello", "documents": ["hi", "world"]}
+        start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+                r = await client.post(
+                    f"{base_url}/rerank",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json=payload,
+                )
+        except httpx.TimeoutException:
+            return HealthInfo(status="down", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+        except httpx.RequestError:
+            return HealthInfo(status="down", response_ms=0, error_code="network_error")
+        response_ms = int((time.monotonic() - start) * 1000)
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                if not data.get("results"):
+                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            except (KeyError, TypeError):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
+            return HealthInfo(status=status, response_ms=response_ms)
+        if r.status_code == 429:
+            return HealthInfo(status="down", response_ms=response_ms, error_code="rate_limited")
+        if r.status_code in (401, 403):
+            return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
+        return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
+
+    async def _health_check_chat(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         payload = {
             "model": model_id,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "你是什么模型"}],
+            "max_tokens": 20,
         }
         start = time.monotonic()
         try:
@@ -103,6 +178,12 @@ class SiliconFlowAdapter(ProviderAdapter):
         response_ms = int((time.monotonic() - start) * 1000)
 
         if r.status_code == 200:
+            try:
+                content = r.json()["choices"][0]["message"]["content"]
+                if not content or not content.strip():
+                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            except (KeyError, IndexError, TypeError):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(
                 status=status, response_ms=response_ms,

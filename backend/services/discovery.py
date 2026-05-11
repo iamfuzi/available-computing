@@ -119,11 +119,17 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
                 m.is_active = False
                 session.add(m)
 
-        channel.last_probed_at = datetime.now(timezone.utc)
-        session.add(channel)
+        ch = session.get(Channel, channel_id)
+        if ch:
+            ch.last_probed_at = datetime.now(timezone.utc)
+            session.add(ch)
         session.commit()
 
     await events.broadcast("pool_updated", {"channel_id": channel_id})
+
+    # Health-probe newly discovered models so status isn't "unknown"
+    from services.health import probe_channel_models
+    await probe_channel_models(channel_id)
 
 
 async def discover_all_channels(get_key_fn=None):

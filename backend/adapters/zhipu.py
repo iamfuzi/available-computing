@@ -53,15 +53,36 @@ class ZhiPuAdapter(ProviderAdapter):
             data = r.json()
 
         models = []
+        seen = set()
         for m in data.get("data", []):
             model_id = m.get("id", "")
+            seen.add(model_id)
             models.append(ModelInfo(
                 model_id=model_id,
                 display_name=model_id,
                 category=_infer_category(model_id),
                 raw=m,
             ))
+
+        # ZhiPu /v4/models omits flash models — supplement from whitelist
+        from services.whitelist import whitelist
+        for entry in (self._whitelist_free_models() or []):
+            if entry["id"] not in seen:
+                seen.add(entry["id"])
+                models.append(ModelInfo(
+                    model_id=entry["id"],
+                    display_name=entry["id"],
+                    category=entry.get("category") or _infer_category(entry["id"]),
+                    raw={"id": entry["id"], "source": "whitelist"},
+                ))
+
         return models
+
+    @staticmethod
+    def _whitelist_free_models() -> list[dict]:
+        from services.whitelist import whitelist
+        provider = whitelist._data.get("providers", {}).get("zhipu", {})
+        return provider.get("free_models", [])
 
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
         # ZhiPu doesn't expose pricing in the models API; rely on whitelist
@@ -70,8 +91,8 @@ class ZhiPuAdapter(ProviderAdapter):
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         payload = {
             "model": model_id,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "你是什么模型"}],
+            "max_tokens": 20,
         }
         start = time.monotonic()
         try:
@@ -89,6 +110,12 @@ class ZhiPuAdapter(ProviderAdapter):
         response_ms = int((time.monotonic() - start) * 1000)
 
         if r.status_code == 200:
+            try:
+                content = r.json()["choices"][0]["message"]["content"]
+                if not content or not content.strip():
+                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            except (KeyError, IndexError, TypeError):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(
                 status=status, response_ms=response_ms,

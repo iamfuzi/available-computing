@@ -3,6 +3,7 @@ import Pool from './pages/Pool'
 import Channels from './pages/Channels'
 import ModelDetail from './pages/ModelDetail'
 import Settings from './pages/Settings'
+import ApiDocs from './pages/ApiDocs'
 import Login from './pages/Login'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -24,8 +25,7 @@ function Layout({ children }: { children: React.ReactNode }) {
       {/* Desktop sidebar */}
       <aside className="hidden md:flex w-52 bg-white border-r border-gray-200 flex-col py-5 px-3 gap-1 shrink-0 sticky top-0 h-screen">
         <div className="px-3 mb-6">
-          <div className="text-base font-bold text-gray-900">⚡ Available</div>
-          <div className="text-xs text-gray-400 -mt-0.5">Computing</div>
+          <div className="text-base font-bold text-gray-900">⚡ 算力池</div>
         </div>
         <nav className="flex flex-col gap-1">
           <NavLink to="/" end className={linkClass}>
@@ -36,6 +36,9 @@ function Layout({ children }: { children: React.ReactNode }) {
           </NavLink>
           <NavLink to="/settings" className={linkClass}>
             <span>⚙️</span><span>设置</span>
+          </NavLink>
+          <NavLink to="/docs" className={linkClass}>
+            <span>📖</span><span>API 文档</span>
           </NavLink>
         </nav>
         <div className="mt-auto px-1">
@@ -54,6 +57,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           { to: '/', end: true, icon: '📊', label: '算力池' },
           { to: '/channels', icon: '🔌', label: '厂商' },
           { to: '/settings', icon: '⚙️', label: '设置' },
+          { to: '/docs', icon: '📖', label: '文档' },
         ].map((item) => (
           <NavLink
             key={item.to}
@@ -93,6 +97,7 @@ export default function App() {
         <Route path="/channels" element={<RequireAuth><Layout><Channels /></Layout></RequireAuth>} />
         <Route path="/models/:id" element={<RequireAuth><Layout><ModelDetail /></Layout></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth><Layout><Settings /></Layout></RequireAuth>} />
+        <Route path="/docs" element={<RequireAuth><Layout><ApiDocs /></Layout></RequireAuth>} />
       </Routes>
     </BrowserRouter>
   )

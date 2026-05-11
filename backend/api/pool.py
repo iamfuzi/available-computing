@@ -25,9 +25,11 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
     for m in free_models:
         health_dist[m.health_status] = health_dist.get(m.health_status, 0) + 1
 
+    usable = sum(v for k, v in health_dist.items() if k != "down")
+
     return {
         "total_channels": total_channels,
         "enabled_channels": enabled_channels,
-        "free_model_count": len(free_models),
+        "free_model_count": usable,
         "health_distribution": health_dist,
     }

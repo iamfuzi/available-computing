@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { poolApi, modelsApi } from '../api/client'
+import { poolApi, modelsApi, channelsApi } from '../api/client'
 import type { ModelRow, PoolSummary } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import StatCard from '../components/StatCard'
@@ -8,8 +8,8 @@ import HealthBadge from '../components/HealthBadge'
 import FreeTypeBadge from '../components/FreeTypeBadge'
 import AddChannelModal from '../components/AddChannelModal'
 
-const CATEGORIES = ['全部', '文本', '多模态', '代码', '嵌入']
-const CAT_MAP: Record<string, string> = { 文本: 'text', 多模态: 'vision', 代码: 'code', 嵌入: 'embedding' }
+const CATEGORIES = ['全部', '文本', '多模态', '代码', '嵌入', '重排', '图像', '视频']
+const CAT_MAP: Record<string, string> = { 文本: 'text', 多模态: 'vision', 代码: 'code', 嵌入: 'embedding', 重排: 'rerank', 图像: 'image', 视频: 'video' }
 
 export default function Pool() {
   const [summary, setSummary] = useState<PoolSummary | null>(null)
@@ -20,6 +20,8 @@ export default function Pool() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [menuOpen, setMenuOpen] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [channels, setChannels] = useState<{id: string, name: string, provider_type: string}[]>([])
+  const [provider, setProvider] = useState('')
   const menuRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -35,6 +37,7 @@ export default function Pool() {
           q: q || undefined,
           category: category !== '全部' ? CAT_MAP[category] : undefined,
           healthy_only: healthyOnly || undefined,
+          provider: provider || undefined,
         }, signal),
       ])
       setSummary(s)
@@ -44,7 +47,11 @@ export default function Pool() {
     } finally {
       setLoading(false)
     }
-  }, [q, category, healthyOnly])
+  }, [q, category, healthyOnly, provider])
+
+  useEffect(() => {
+    channelsApi.list().then(setChannels).catch(() => {})
+  }, [])
 
   useEffect(() => {
     clearTimeout(debounceRef.current)
@@ -177,6 +184,21 @@ export default function Pool() {
                 </button>
               ))}
             </div>
+            {channels.length > 1 && (() => {
+              const unique = [...new Map(channels.map(c => [c.provider_type, c])).values()]
+              return (
+              <select
+                value={provider}
+                onChange={(e) => setProvider(e.target.value)}
+                className="text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-600 focus:outline-none focus:border-blue-400"
+              >
+                <option value="">全部厂商</option>
+                {unique.map((ch) => (
+                  <option key={ch.provider_type} value={ch.provider_type}>{ch.name}</option>
+                ))}
+              </select>
+              )
+            })()}
             <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
               <input
                 type="checkbox"

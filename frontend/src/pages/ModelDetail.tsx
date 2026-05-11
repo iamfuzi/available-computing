@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { modelsApi } from '../api/client'
 import type { ModelRow, HealthRecord } from '../api/client'
@@ -41,6 +41,106 @@ const stream = await client.chat.completions.create({
 });
 for await (const chunk of stream) {
   process.stdout.write(chunk.choices[0]?.delta?.content ?? "");`
+}
+
+function QuickTry({ modelId, providerName }: { modelId: string; providerName: string }) {
+  const [input, setInput] = useState('')
+  const [response, setResponse] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  async function handleSend() {
+    const msg = input.trim()
+    if (!msg || loading) return
+    setLoading(true)
+    setError('')
+    setResponse('')
+    setInput('')
+
+    try {
+      const token = localStorage.getItem('token')
+      const res = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          model: modelId,
+          messages: [{ role: 'user', content: msg }],
+          stream: true,
+        }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: { message: res.statusText } }))
+        throw new Error(err.error?.message || err.detail || `HTTP ${res.status}`)
+      }
+
+      const reader = res.body?.getReader()
+      if (!reader) throw new Error('No response body')
+      const decoder = new TextDecoder()
+      let text = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const chunk = decoder.decode(value, { stream: true })
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ') || line === 'data: [DONE]') continue
+          try {
+            const data = JSON.parse(line.slice(6))
+            const delta = data.choices?.[0]?.delta?.content
+            if (delta) {
+              text += delta
+              setResponse(text)
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '调用失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [response])
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
+      <h2 className="text-sm font-semibold text-gray-900">试一试 · {providerName}</h2>
+
+      {(response || error) && (
+        <div className="bg-gray-50 rounded-xl p-4 text-sm whitespace-pre-wrap break-words max-h-80 overflow-y-auto">
+          {response && <span className="text-gray-800">{response}</span>}
+          {error && <span className="text-red-600">{error}</span>}
+          <div ref={bottomRef} />
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+          placeholder="输入消息，按 Enter 发送..."
+          disabled={loading}
+          className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100 disabled:opacity-50 transition-shadow"
+        />
+        <button
+          onClick={handleSend}
+          disabled={loading || !input.trim()}
+          className="bg-gray-900 text-white text-sm px-4 py-2 rounded-lg hover:bg-gray-800 disabled:opacity-50 transition-colors shrink-0"
+        >
+          {loading ? '...' : '发送'}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -218,38 +318,45 @@ export default function ModelDetail() {
         )}
       </div>
 
+      {/* Quick try */}
+      <QuickTry modelId={model.model_id} providerName={model.provider_name || ''} />
+
       {/* Code example */}
-      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-gray-900">快速调用</h2>
-          <button
-            onClick={copyExample}
-            className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
-              copied
-                ? 'bg-green-50 text-green-700'
-                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-            }`}
-          >
-            {copied ? '✓ 已复制' : '📋 复制'}
-          </button>
-        </div>
-        <div className="flex bg-gray-900 rounded-lg p-0.5 gap-0.5">
-          {TABS.map((t) => (
+      <details className="bg-white border border-gray-200 rounded-2xl shadow-sm">
+        <summary className="px-5 py-4 cursor-pointer text-sm font-semibold text-gray-900 select-none">
+          代码示例
+        </summary>
+        <div className="px-5 pb-5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex bg-gray-900 rounded-lg p-0.5 gap-0.5">
+              {TABS.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`text-xs px-3 py-1.5 rounded-md transition-colors ${
+                    tab === t ? 'bg-gray-700 text-white' : 'text-gray-500'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
             <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`text-xs px-3 py-1.5 rounded-md transition-colors ${
-                tab === t ? 'bg-gray-700 text-white' : 'text-gray-500'
+              onClick={copyExample}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                copied
+                  ? 'bg-green-50 text-green-700'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              {t}
+              {copied ? '✓ 已复制' : '📋 复制'}
             </button>
-          ))}
+          </div>
+          <pre className="bg-gray-950 text-gray-300 text-xs rounded-xl p-4 overflow-x-auto leading-relaxed whitespace-pre-wrap font-mono">
+            {buildExample(model, tab)}
+          </pre>
         </div>
-        <pre className="bg-gray-950 text-gray-300 text-xs rounded-xl p-4 overflow-x-auto leading-relaxed whitespace-pre-wrap font-mono">
-          {buildExample(model, tab)}
-        </pre>
-      </div>
+      </details>
     </div>
   )
 }

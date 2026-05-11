@@ -28,7 +28,7 @@ export default function Login() {
       <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-1">
           <div className="text-3xl">⚡</div>
-          <h1 className="text-xl font-bold text-gray-900">Available Computing</h1>
+          <h1 className="text-xl font-bold text-gray-900">算力池</h1>
           <p className="text-sm text-gray-400">聚合你的免费 AI 算力</p>
         </div>
 

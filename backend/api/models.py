@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Query
 from sqlmodel import Session, select
@@ -16,6 +16,7 @@ def list_models(
     category: Optional[str] = None,
     free_only: bool = True,
     healthy_only: bool = False,
+    hide_down: bool = True,
     q: Optional[str] = None,
     session: Session = Depends(get_session),
     _=Depends(verify_token),
@@ -26,6 +27,8 @@ def list_models(
         stmt = stmt.where(Model.is_free == True)
     if healthy_only:
         stmt = stmt.where(Model.health_status == "healthy")
+    if hide_down:
+        stmt = stmt.where(Model.health_status != "down")
     if category:
         stmt = stmt.where(Model.category == category)
     if q:
@@ -90,7 +93,7 @@ def get_health_history(
         raise HTTPException(404)
 
     hours = 168 if period == "7d" else 24
-    since = datetime.utcnow() - timedelta(hours=hours)
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
 
     records = session.exec(
         select(HealthRecord)

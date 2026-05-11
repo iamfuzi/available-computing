@@ -56,6 +56,14 @@ export const settingsApi = {
   update: (data: Partial<Settings>) => api.patch('/settings', data),
 }
 
+export const apiKeysApi = {
+  list: () => api.get<ApiKeyRow[]>('/apikeys').then((r) => r.data),
+  create: (name: string) => api.post<ApiKeyCreated>('/apikeys', { name }).then((r) => r.data),
+  update: (id: string, data: { is_active?: boolean; name?: string }) =>
+    api.patch(`/apikeys/${id}`, data),
+  delete: (id: string) => api.delete(`/apikeys/${id}`),
+}
+
 // Types
 export interface PoolSummary {
   total_channels: number
@@ -133,4 +141,22 @@ export interface Settings {
   probe_interval_hours: string
   slow_threshold_ms: string
   whitelist_version: string
+}
+
+export interface ApiKeyRow {
+  id: string
+  name: string
+  key: string
+  key_prefix: string
+  is_active: boolean
+  created_at: string
+  last_used_at: string | null
+}
+
+export interface ApiKeyCreated {
+  id: string
+  name: string
+  key: string
+  key_prefix: string
+  created_at: string
 }

@@ -6,6 +6,12 @@ import AddChannelModal from '../components/AddChannelModal'
 export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([])
   const [showAddModal, setShowAddModal] = useState(false)
+  const [editChannel, setEditChannel] = useState<Channel | null>(null)
+  const [editKey, setEditKey] = useState('')
+  const [editName, setEditName] = useState('')
+  const [editBaseUrl, setEditBaseUrl] = useState('')
+  const [editLoading, setEditLoading] = useState(false)
+  const [editError, setEditError] = useState('')
   const [probingId, setProbingId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -54,6 +60,35 @@ export default function Channels() {
       load()
     } catch {
       setError('删除失败')
+    }
+  }
+
+  function openEdit(ch: Channel) {
+    setEditChannel(ch)
+    setEditName(ch.name)
+    setEditKey('')
+    setEditBaseUrl(ch.base_url || '')
+    setEditError('')
+  }
+
+  async function handleEditSave() {
+    if (!editChannel) return
+    setEditLoading(true)
+    setEditError('')
+    try {
+      const data: Record<string, string> = {}
+      if (editName.trim() && editName !== editChannel.name) data.name = editName.trim()
+      if (editBaseUrl.trim() !== (editChannel.base_url || '')) data.base_url = editBaseUrl.trim() || ''
+      if (editKey.trim()) data.api_key = editKey.trim()
+      if (Object.keys(data).length > 0) {
+        await channelsApi.update(editChannel.id, data)
+      }
+      setEditChannel(null)
+      load()
+    } catch {
+      setEditError('保存失败')
+    } finally {
+      setEditLoading(false)
     }
   }
 
@@ -135,6 +170,12 @@ export default function Channels() {
                   {probingId === ch.id ? '探测中...' : '🔄 刷新'}
                 </button>
                 <button
+                  onClick={() => openEdit(ch)}
+                  className="text-xs border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-50 transition-colors"
+                >
+                  ✏️ 编辑
+                </button>
+                <button
                   onClick={() => handleToggle(ch)}
                   className={`text-xs border px-3 py-1.5 rounded-lg transition-colors ${
                     ch.enabled
@@ -161,6 +202,66 @@ export default function Channels() {
         onClose={() => setShowAddModal(false)}
         onCreated={load}
       />
+
+      {/* Edit modal */}
+      {editChannel && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100">
+              <h2 className="text-base font-semibold text-gray-900">编辑 {editChannel.name}</h2>
+              <button onClick={() => setEditChannel(null)} className="text-gray-300 hover:text-gray-600 text-lg leading-none transition-colors">✕</button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">名称</label>
+                <input
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 transition-shadow"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                  API Key <span className="text-gray-400 font-normal text-xs">留空则不修改</span>
+                </label>
+                <input
+                  type="password"
+                  value={editKey}
+                  onChange={(e) => setEditKey(e.target.value)}
+                  placeholder={`当前: ${editChannel.api_key_hint}`}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 transition-shadow font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Base URL</label>
+                <input
+                  value={editBaseUrl}
+                  onChange={(e) => setEditBaseUrl(e.target.value)}
+                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 transition-shadow font-mono text-xs"
+                />
+              </div>
+              {editError && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-2">{editError}</p>
+              )}
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setEditChannel(null)}
+                  className="flex-1 border border-gray-200 text-gray-600 rounded-xl py-2.5 text-sm hover:bg-gray-50 transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleEditSave}
+                  disabled={editLoading}
+                  className="flex-1 bg-gray-900 text-white rounded-xl py-2.5 text-sm hover:bg-gray-800 disabled:opacity-40 transition-colors"
+                >
+                  {editLoading ? '保存中...' : '保存'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

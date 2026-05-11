@@ -4,12 +4,14 @@ from sqlmodel import SQLModel, Field
 import uuid
 
 
-class Channel(SQLModel, table=True):
+class ApiKey(SQLModel, table=True):
+    __tablename__ = "apikey"
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    provider_type: str
     name: str
-    api_key_enc: str
-    base_url: Optional[str] = None
-    enabled: bool = True
+    key_hash: str = Field(index=True)
+    key_prefix: str
+    key_encrypted: str = Field(default="")
+    is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    last_probed_at: Optional[datetime] = None
+    last_used_at: Optional[datetime] = None

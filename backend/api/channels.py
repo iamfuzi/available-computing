@@ -52,6 +52,7 @@ class ChannelUpdate(BaseModel):
     name: Optional[str] = None
     base_url: Optional[str] = None
     enabled: Optional[bool] = None
+    api_key: Optional[str] = None
 
 
 @router.get("/providers")
@@ -132,6 +133,8 @@ def update_channel(
         ch.base_url = body.base_url
     if body.enabled is not None:
         ch.enabled = body.enabled
+    if body.api_key is not None:
+        ch.api_key_enc = _encrypt_key(body.api_key, session)
     session.add(ch)
     session.commit()
     return ch

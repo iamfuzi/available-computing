@@ -79,8 +79,8 @@ class OpenRouterAdapter(ProviderAdapter):
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         payload = {
             "model": model_id,
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "你是什么模型"}],
+            "max_tokens": 20,
         }
         start = time.monotonic()
         try:
@@ -101,6 +101,12 @@ class OpenRouterAdapter(ProviderAdapter):
         response_ms = int((time.monotonic() - start) * 1000)
 
         if r.status_code == 200:
+            try:
+                content = r.json()["choices"][0]["message"]["content"]
+                if not content or not content.strip():
+                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+            except (KeyError, IndexError, TypeError):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(
                 status=status, response_ms=response_ms,

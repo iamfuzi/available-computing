@@ -43,6 +43,42 @@ providers:
       - id: "BAAI/bge-large-zh-v1.5"
         free_type: permanent
         category: embedding
+      - id: "BAAI/bge-large-en-v1.5"
+        free_type: permanent
+        category: embedding
+      - id: "BAAI/bge-reranker-v2-m3"
+        free_type: permanent
+        category: rerank
+      - id: "Pro/BAAI/bge-m3"
+        free_type: permanent
+        category: embedding
+      - id: "Pro/BAAI/bge-reranker-v2-m3"
+        free_type: permanent
+        category: rerank
+      - id: "Qwen/Qwen3-Embedding-0.6B"
+        free_type: permanent
+        category: embedding
+      - id: "Qwen/Qwen3-Embedding-4B"
+        free_type: permanent
+        category: embedding
+      - id: "Qwen/Qwen3-Embedding-8B"
+        free_type: permanent
+        category: embedding
+      - id: "Qwen/Qwen3-Reranker-0.6B"
+        free_type: permanent
+        category: rerank
+      - id: "Qwen/Qwen3-Reranker-4B"
+        free_type: permanent
+        category: rerank
+      - id: "Qwen/Qwen3-Reranker-8B"
+        free_type: permanent
+        category: rerank
+      - id: "netease-youdao/bce-embedding-base_v1"
+        free_type: permanent
+        category: embedding
+      - id: "netease-youdao/bce-reranker-base_v1"
+        free_type: permanent
+        category: rerank
 
   gemini:
     free_strategy: whitelist
@@ -111,11 +147,15 @@ providers:
         free_type: permanent
         category: vision
         notes: "单图理解，免费"
-      - id: "cogviewx-flash"
+      - id: "cogvideox-flash"
         free_type: permanent
-        category: image
+        category: video
         notes: "视频生成，免费"
       - id: "cogview-3-flash"
         free_type: permanent
         category: image
         notes: "图像生成，免费"
+      - id: "glm-4.1v-thinking-flash"
+        free_type: permanent
+        category: vision
+        notes: "视觉推理，免费"

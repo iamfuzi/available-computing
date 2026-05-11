@@ -1,6 +1,7 @@
 import pytest
 import json
 from unittest.mock import patch, MagicMock, AsyncMock
+from database import get_session
 
 
 # ── Unit tests ────────────────────────────────────────────────────────────
@@ -253,7 +254,8 @@ class TestChatCompletionsGemini:
             assert body["choices"][0]["message"]["content"] == "Hello from Gemini"
 
     @pytest.mark.asyncio
-    async def test_gemini_stream_rejected(self, app_client, auth_headers, db_session, sample_channel):
+    async def test_gemini_stream_not_rejected(self, app_client, auth_headers, db_session, sample_channel):
+        """Gemini streaming should no longer return 400 — it's now supported."""
         self._setup_gemini(db_session, sample_channel)
         resp = await app_client.post(
             "/v1/chat/completions",
@@ -264,7 +266,8 @@ class TestChatCompletionsGemini:
             },
             headers=auth_headers,
         )
-        assert resp.status_code == 400
+        # Should not be 400 (old behavior was to reject streaming)
+        assert resp.status_code != 400
 
     @pytest.mark.asyncio
     async def test_gemini_system_instruction(self, app_client, auth_headers, db_session, sample_channel):
@@ -301,3 +304,160 @@ class TestChatCompletionsGemini:
             )
             assert resp.status_code == 200
             assert captured_payload.get("systemInstruction", {}).get("parts", [{}])[0].get("text") == "You are helpful"
+
+
+class TestOpenAIModelsList:
+    @pytest.mark.asyncio
+    async def test_returns_openai_format(self, app_client, auth_headers, sample_model, sample_channel):
+        resp = await app_client.get("/v1/models", headers=auth_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["object"] == "list"
+        assert isinstance(body["data"], list)
+        assert len(body["data"]) == 1
+        m = body["data"][0]
+        assert m["id"] == "test-model-free"
+        assert m["object"] == "model"
+        assert "owned_by" in m
+
+    @pytest.mark.asyncio
+    async def test_excludes_inactive_models(self, app_client, auth_headers, db_session, sample_channel):
+        from models import Model
+        inactive = Model(
+            id="mdl-inactive",
+            channel_id=sample_channel.id,
+            model_id="inactive-model",
+            is_free=True,
+            is_active=False,
+        )
+        db_session.add(inactive)
+        db_session.commit()
+        resp = await app_client.get("/v1/models", headers=auth_headers)
+        body = resp.json()
+        ids = [m["id"] for m in body["data"]]
+        assert "inactive-model" not in ids
+
+    @pytest.mark.asyncio
+    async def test_excludes_paid_models(self, app_client, auth_headers, db_session, sample_channel):
+        from models import Model
+        paid = Model(
+            id="mdl-paid3",
+            channel_id=sample_channel.id,
+            model_id="paid-model-3",
+            is_free=False,
+            is_active=True,
+        )
+        db_session.add(paid)
+        db_session.commit()
+        resp = await app_client.get("/v1/models", headers=auth_headers)
+        body = resp.json()
+        ids = [m["id"] for m in body["data"]]
+        assert "paid-model-3" not in ids
+
+    @pytest.mark.asyncio
+    async def test_requires_auth(self, app_client):
+        resp = await app_client.get("/v1/models")
+        assert resp.status_code == 403
+
+
+class TestHealthAwareRouting:
+    def test_down_model_skipped(self, db_session, sample_model, sample_channel):
+        from api.proxy import _resolve_model
+        sample_model.health_status = "down"
+        db_session.add(sample_model)
+        db_session.commit()
+        model, _, _, _ = _resolve_model("test-model-free", db_session)
+        assert model is None
+
+    def test_healthy_preferred_over_slow(self, db_session, sample_channel):
+        from models import Model
+        from api.proxy import _resolve_model
+        slow = Model(
+            id="mdl-slow",
+            channel_id=sample_channel.id,
+            model_id="shared-model",
+            is_free=True,
+            is_active=True,
+            health_status="slow",
+            last_response_ms=3000,
+        )
+        fast = Model(
+            id="mdl-fast",
+            channel_id=sample_channel.id,
+            model_id="shared-model",
+            is_free=True,
+            is_active=True,
+            health_status="healthy",
+            last_response_ms=200,
+        )
+        db_session.add(slow)
+        db_session.add(fast)
+        db_session.commit()
+        model, _, _, _ = _resolve_model("shared-model", db_session)
+        assert model is not None
+        assert model.health_status == "healthy"
+        assert model.last_response_ms == 200
+
+
+class TestAutoRouting:
+    @pytest.mark.asyncio
+    async def test_auto_text_resolves(self, app_client, auth_headers, sample_model, sample_channel):
+        from models import Model
+        sample_model.category = "text"
+        sample_model.health_status = "healthy"
+        db_session = app_client._transport.app.dependency_overrides[get_session]()
+        db_session.add(sample_model)
+        db_session.commit()
+
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "id": "chatcmpl-123",
+                "choices": [{"message": {"role": "assistant", "content": "Hello!"}}],
+            }
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_cm.post = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = mock_cm
+
+            resp = await app_client.post(
+                "/v1/chat/completions",
+                json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
+                headers=auth_headers,
+            )
+            assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_auto_unknown_category_404(self, app_client, auth_headers):
+        resp = await app_client.post(
+            "/v1/chat/completions",
+            json={"model": "auto:nonexistent", "messages": [{"role": "user", "content": "hi"}]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_auto_no_available_models_404(self, app_client, auth_headers, db_session, sample_channel):
+        """All models down → auto:text returns 404."""
+        from models import Model
+        down = Model(
+            id="mdl-down2",
+            channel_id=sample_channel.id,
+            model_id="down-text-model",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="down",
+        )
+        db_session.add(down)
+        db_session.commit()
+
+        resp = await app_client.post(
+            "/v1/chat/completions",
+            json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404

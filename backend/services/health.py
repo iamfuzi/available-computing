@@ -93,6 +93,12 @@ async def active_probe(model: Model, decrypted_key: str):
 
         m = session.get(Model, model.id)
         if m:
+            # Don't mark down on network errors — likely transient
+            if health.error_code == "network_error":
+                m.last_checked_at = datetime.now(timezone.utc)
+                session.add(m)
+                session.commit()
+                return
             m.health_status = health.status
             m.last_response_ms = health.response_ms
             m.last_checked_at = datetime.now(timezone.utc)
@@ -126,24 +132,27 @@ def _get_daily_limit(model: Model) -> int | None:
 
 async def probe_all_stale_models(get_key_fn=None):
     """Active-probe all models with no real call in the past 4 hours."""
+    from models import Channel
+
+    # Batch load all channels and decrypt keys in a single session
     with Session(engine) as session:
         stale_models = session.exec(
             select(Model).where(Model.is_active == True).where(Model.is_free == True)
         ).all()
 
-    from models import Channel
-    tasks = []
-    for m in stale_models:
-        with Session(engine) as session:
-            ch = session.get(Channel, m.channel_id)
+        channels = {ch.id: ch for ch in session.exec(select(Channel)).all()}
+        from services.crypto import decrypt as _decrypt
+        from api.channels import _get_salt
+        from config import get_admin_password
+        salt = _get_salt(session)
+
+        work_items = []
+        for m in stale_models:
+            ch = channels.get(m.channel_id)
             if not ch or not ch.enabled:
                 continue
-            from services.crypto import decrypt as _decrypt
-            from api.channels import _get_salt
-            from config import get_admin_password
-            salt = _get_salt(session)
             key = _decrypt(ch.api_key_enc, get_admin_password(), salt)
-        tasks.append(active_probe(m, key))
+            work_items.append((m, key))
 
     semaphore = asyncio.Semaphore(20)
 
@@ -151,4 +160,35 @@ async def probe_all_stale_models(get_key_fn=None):
         async with semaphore:
             return await coro
 
-    await asyncio.gather(*[bounded(t) for t in tasks], return_exceptions=True)
+    await asyncio.gather(*[bounded(active_probe(m, key)) for m, key in work_items], return_exceptions=True)
+
+
+async def probe_channel_models(channel_id: str):
+    """Active-probe all active free models for a single channel."""
+    from models import Channel
+
+    with Session(engine) as session:
+        channel = session.get(Channel, channel_id)
+        if not channel or not channel.enabled:
+            return
+
+        models = session.exec(
+            select(Model)
+            .where(Model.channel_id == channel_id)
+            .where(Model.is_active == True)
+            .where(Model.is_free == True)
+        ).all()
+
+        from services.crypto import decrypt as _decrypt
+        from api.channels import _get_salt
+        from config import get_admin_password
+        salt = _get_salt(session)
+        key = _decrypt(channel.api_key_enc, get_admin_password(), salt)
+
+    semaphore = asyncio.Semaphore(10)
+
+    async def bounded(coro):
+        async with semaphore:
+            return await coro
+
+    await asyncio.gather(*[bounded(active_probe(m, key)) for m in models], return_exceptions=True)

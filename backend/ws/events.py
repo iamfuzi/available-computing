@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from jose import jwt, JWTError
 from config import JWT_SECRET, JWT_ALGORITHM
@@ -18,6 +19,26 @@ async def _send(message: str):
 
 
 events.subscribe(_send)
+
+
+async def _cleanup_dead_connections():
+    """Periodically ping all connections and remove dead ones."""
+    while True:
+        await asyncio.sleep(60)
+        if not _connections:
+            continue
+        dead = set()
+        for ws in list(_connections):
+            try:
+                await ws.send_json({"event": "ping"})
+            except Exception:
+                dead.add(ws)
+        _connections.difference_update(dead)
+
+
+async def start_cleanup_task():
+    task = asyncio.create_task(_cleanup_dead_connections())
+    return task
 
 
 @router.websocket("/ws/events")

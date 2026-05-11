@@ -1,3 +1,5 @@
+import os
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,9 +7,9 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from database import create_db_and_tables
-from api import auth, channels, models, pool, settings
+from api import auth, channels, models, pool, settings, apikeys
 from api.proxy import router as proxy_router
-from ws.events import router as ws_router
+from ws.events import router as ws_router, start_cleanup_task
 from services.scheduler import init_scheduler, shutdown_scheduler
 
 
@@ -32,16 +34,19 @@ def get_key_fn(channel):
 async def lifespan(app: FastAPI):
     create_db_and_tables()
     init_scheduler(get_key_fn)
+    cleanup_task = await start_cleanup_task()
     yield
+    cleanup_task.cancel()
     shutdown_scheduler()
 
 
 app = FastAPI(title="Available Computing", lifespan=lifespan)
 
+_cors_origins = os.environ.get("CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,6 +57,7 @@ app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"]
 app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(pool.router, prefix="/api/v1/pool", tags=["pool"])
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
+app.include_router(apikeys.router, prefix="/api/v1/apikeys", tags=["apikeys"])
 
 # WebSocket
 app.include_router(ws_router)
@@ -59,7 +65,23 @@ app.include_router(ws_router)
 # OpenAI-compatible proxy
 app.include_router(proxy_router, prefix="/v1", tags=["proxy"])
 
-# Serve frontend static files in production
-static_dir = Path(__file__).parent / "static"
-if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+# Serve frontend static files + SPA fallback
+_static_dir = Path(__file__).parent / "static"
+if _static_dir.exists():
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import FileResponse, Response
+
+    _spa_index = _static_dir / "index.html"
+
+    class SPAFallback(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            response: Response = await call_next(request)
+            if response.status_code == 404 and request.method == "GET":
+                accept = request.headers.get("accept", "")
+                if "text/html" in accept and _spa_index.exists():
+                    return FileResponse(str(_spa_index), media_type="text/html")
+            return response
+
+    app.add_middleware(SPAFallback)
+    app.mount("/", StaticFiles(directory=str(_static_dir), html=True), name="static")
