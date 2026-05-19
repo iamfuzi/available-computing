@@ -6,7 +6,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - app-data:/app/data
+      - ./backend/data:/app/data
     environment:
       - ADMIN_PASSWORD_FILE=/run/secrets/ac_admin_password
       - JWT_SECRET_FILE=/run/secrets/ac_jwt_secret
@@ -14,9 +14,6 @@ services:
       - ac_admin_password
       - ac_jwt_secret
     restart: unless-stopped
-
-volumes:
-  app-data:
 
 secrets:
   ac_admin_password:
