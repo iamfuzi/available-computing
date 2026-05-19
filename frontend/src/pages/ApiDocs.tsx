@@ -1,20 +1,40 @@
 import { useState, useEffect } from 'react'
-import { apiKeysApi, modelsApi } from '../api/client'
-import type { ApiKeyRow, ModelRow } from '../api/client'
+import { apiKeysApi, modelsApi, channelsApi } from '../api/client'
+import type { ApiKeyRow, ModelRow, Channel } from '../api/client'
 
-type Tab = 'curl' | 'python' | 'node'
+type Tab = 'test' | 'curl' | 'python' | 'node'
+type CodeTab = 'curl' | 'python' | 'node'
 
-const TABS: { id: Tab; label: string }[] = [
+const CODE_TABS: { id: CodeTab; label: string }[] = [
   { id: 'curl', label: 'cURL' },
   { id: 'python', label: 'Python' },
   { id: 'node', label: 'Node.js' },
 ]
 
+const TEST_TABS = [
+  { id: 'test' as Tab, label: '🧪 在线测试' },
+  { id: 'curl' as Tab, label: 'cURL' },
+  { id: 'python' as Tab, label: 'Python' },
+  { id: 'node' as Tab, label: 'Node.js' },
+]
+
 export default function ApiDocs() {
   const [keys, setKeys] = useState<ApiKeyRow[]>([])
+  const [channels, setChannels] = useState<Channel[]>([])
   const [models, setModels] = useState<ModelRow[]>([])
-  const [tab, setTab] = useState<Tab>('curl')
+  const [tab, setTab] = useState<Tab>('test')
+  const [codeTab, setCodeTab] = useState<CodeTab>('curl')
   const [copied, setCopied] = useState<string | null>(null)
+
+  // Test panel states
+  const [selectedChannelId, setSelectedChannelId] = useState<string>('')
+  const [selectedModel, setSelectedModel] = useState<string>('')
+  const [selectedKeyId, setSelectedKeyId] = useState<string>('')
+  const [testMessage, setTestMessage] = useState('你好，介绍一下你自己')
+  const [testResponse, setTestResponse] = useState<string>('')
+  const [isStreaming, setIsStreaming] = useState(false)
+  const [streamFinished, setStreamFinished] = useState(true)
+  const [testError, setTestError] = useState<string>('')
 
   const baseUrl = `${window.location.origin}/v1`
   const activeKey = keys.find((k) => k.is_active)
@@ -23,8 +43,106 @@ export default function ApiDocs() {
 
   useEffect(() => {
     apiKeysApi.list().then(setKeys).catch(() => {})
+    channelsApi.list().then(setChannels).catch(() => {})
     modelsApi.list({ free_only: true }).then(setModels).catch(() => {})
   }, [])
+
+  // Auto-select first options
+  useEffect(() => {
+    if (channels.length > 0 && !selectedChannelId) {
+      setSelectedChannelId(channels[0].id)
+    }
+  }, [channels])
+
+  useEffect(() => {
+    if (keys.length > 0 && !selectedKeyId) {
+      setSelectedKeyId(keys.find(k => k.is_active)?.id || keys[0].id)
+    }
+  }, [keys])
+
+  useEffect(() => {
+    if (selectedChannelId) {
+      const channelModels = models.filter(m => m.channel_id === selectedChannelId)
+      if (channelModels.length > 0 && (!selectedModel || !channelModels.find(m => m.model_id === selectedModel))) {
+        setSelectedModel(channelModels[0].model_id)
+      }
+    }
+  }, [selectedChannelId, models])
+
+  const filteredModels = selectedChannelId
+    ? models.filter(m => m.channel_id === selectedChannelId)
+    : models
+
+  async function runTest() {
+    if (!selectedModel || !testMessage || isStreaming) return
+
+    setIsStreaming(true)
+    setStreamFinished(false)
+    setTestResponse('')
+    setTestError('')
+
+    try {
+      const apiKey = keys.find(k => k.id === selectedKeyId)
+      if (!apiKey) {
+        throw new Error('请选择API密钥')
+      }
+
+      const response = await fetch('/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey.key}`
+        },
+        body: JSON.stringify({
+          model: selectedModel,
+          messages: [{ role: 'user', content: testMessage }],
+          stream: true
+        })
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`HTTP ${response.status}: ${error}`)
+      }
+
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+
+      if (!reader) {
+        throw new Error('无法读取响应流')
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        const lines = chunk.split('\n')
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6)
+            if (data === '[DONE]') continue
+
+            try {
+              const parsed = JSON.parse(data)
+              const content = parsed.choices?.[0]?.delta?.content
+              if (content) {
+                setTestResponse(prev => prev + content)
+              }
+            } catch (e) {
+              // Ignore parse errors for incomplete chunks
+            }
+          }
+        }
+      }
+    } catch (err) {
+      setTestError(err instanceof Error ? err.message : '未知错误')
+    } finally {
+      setIsStreaming(false)
+      setStreamFinished(true)
+    }
+  }
 
   function copy(text: string, id: string) {
     navigator.clipboard.writeText(text)
@@ -115,10 +233,176 @@ data.forEach(m => console.log(m.id));`
   const listCode = listExample()
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+    <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
       <div>
         <h1 className="text-lg font-bold text-gray-900">API 文档</h1>
         <p className="text-xs text-gray-400 mt-0.5">使用 OpenAI 兼容接口调用算力池</p>
+      </div>
+
+      {/* Online Test Panel */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">🧪 在线测试</h2>
+          <div className="flex gap-1">
+            {TEST_TABS.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => {
+                  setTab(t.id)
+                  // Sync codeTab when clicking cURL/Python/Node.js tabs
+                  if (t.id !== 'test') {
+                    setCodeTab(t.id as CodeTab)
+                  }
+                }}
+                className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                  tab === t.id ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {tab === 'test' ? (
+          <div className="space-y-4">
+            {/* Selectors */}
+            <div className="grid grid-cols-3 gap-3">
+              {/* Channel Selection */}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1.5">厂商</label>
+                <select
+                  value={selectedChannelId}
+                  onChange={(e) => setSelectedChannelId(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {channels.map((ch) => (
+                    <option key={ch.id} value={ch.id}>
+                      {ch.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Model Selection */}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1.5">模型</label>
+                <select
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  disabled={!selectedChannelId}
+                >
+                  {filteredModels.map((m) => (
+                    <option key={m.id} value={m.model_id}>
+                      {m.display_name || m.model_id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* API Key Selection */}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1.5">API 密钥</label>
+                <select
+                  value={selectedKeyId}
+                  onChange={(e) => setSelectedKeyId(e.target.value)}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {keys.map((k) => (
+                    <option key={k.id} value={k.id}>
+                      {k.name} ({k.key_prefix})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Test Message Input */}
+            <div>
+              <label className="text-xs text-gray-500 block mb-1.5">测试消息</label>
+              <textarea
+                value={testMessage}
+                onChange={(e) => setTestMessage(e.target.value)}
+                placeholder="输入你想测试的内容..."
+                rows={3}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                disabled={isStreaming}
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={runTest}
+                disabled={!selectedModel || !testMessage || isStreaming}
+                className={`text-sm px-4 py-2 rounded-lg transition-colors ${
+                  !selectedModel || !testMessage || isStreaming
+                    ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                    : 'bg-blue-600 text-white hover:bg-blue-700'
+                }`}
+              >
+                {isStreaming ? '🔄 测试中...' : '▶️ 发送测试'}
+              </button>
+              {testResponse && (
+                <button
+                  onClick={() => { setTestResponse(''); setTestError(''); setStreamFinished(true); }}
+                  className="text-sm px-4 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  🗑️ 清空结果
+                </button>
+              )}
+            </div>
+
+            {/* Response Area */}
+            {(testResponse || testError || isStreaming) && (
+              <div className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="bg-gray-50 px-3 py-2 border-b border-gray-200 flex items-center justify-between">
+                  <span className="text-xs font-medium text-gray-700">
+                    响应结果
+                    {streamFinished && testResponse && <span className="ml-2 text-green-600">✓ 完成</span>}
+                  </span>
+                  {testResponse && (
+                    <button
+                      onClick={() => navigator.clipboard.writeText(testResponse)}
+                      className="text-xs text-blue-600 hover:text-blue-700"
+                    >
+                      复制
+                    </button>
+                  )}
+                </div>
+                <div className="p-4 min-h-[120px] max-h-[300px] overflow-y-auto">
+                  {testError ? (
+                    <div className="text-red-600 text-sm whitespace-pre-wrap">{testError}</div>
+                  ) : testResponse ? (
+                    <div className="text-sm text-gray-800 whitespace-pre-wrap">{testResponse}</div>
+                  ) : isStreaming ? (
+                    <div className="text-sm text-gray-400">等待响应...</div>
+                  ) : null}
+                </div>
+              </div>
+            )}
+
+            {/* Status Hints */}
+            {!selectedChannelId && (
+              <div className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2">
+                ⚠️ 请先选择厂商
+              </div>
+            )}
+            {selectedChannelId && filteredModels.length === 0 && (
+              <div className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2">
+                ⚠️ 该厂商暂无可用模型
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {/* Code examples for non-test tabs */}
+            <div className="bg-gray-900 text-gray-100 rounded-xl p-4 text-xs font-mono overflow-x-auto leading-relaxed">
+              <pre>{tab === 'curl' ? chatCode.curl : tab === 'python' ? chatCode.python : chatCode.node}</pre>
+            </div>
+          </>
+        )}
       </div>
 
       {/* Quick Start */}
@@ -183,19 +467,19 @@ data.forEach(m => console.log(m.id));`
           <p className="text-sm text-gray-600">聊天补全，兼容 OpenAI Chat Completion API，支持流式 (SSE)。</p>
 
           <div className="flex gap-1">
-            {TABS.map((t) => (
+            {CODE_TABS.map((t) => (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
+                onClick={() => setCodeTab(t.id)}
                 className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
-                  tab === t.id ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-100'
+                  codeTab === t.id ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-100'
                 }`}
               >
                 {t.label}
               </button>
             ))}
           </div>
-          <CodeBlock code={chatCode[tab]} id={`chat-${tab}`} />
+          <CodeBlock code={chatCode[codeTab]} id={`chat-${codeTab}`} />
         </div>
 
         {/* Models */}
@@ -205,7 +489,7 @@ data.forEach(m => console.log(m.id));`
             <code className="text-sm font-mono ml-2">/models</code>
           </div>
           <p className="text-sm text-gray-600">列出所有可用的免费模型。</p>
-          <CodeBlock code={listCode[tab]} id={`list-${tab}`} />
+          <CodeBlock code={listCode[codeTab]} id={`list-${codeTab}`} />
         </div>
       </div>
 
@@ -227,7 +511,20 @@ data.forEach(m => console.log(m.id));`
             </div>
           ))}
         </div>
-        <CodeBlock code={autoCode[tab]} id={`auto-${tab}`} />
+        <div className="flex gap-1">
+          {CODE_TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setCodeTab(t.id)}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                codeTab === t.id ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-100'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <CodeBlock code={autoCode[codeTab]} id={`auto-${codeTab}`} />
       </div>
 
       {/* Available Models */}

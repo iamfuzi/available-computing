@@ -9,3 +9,4 @@ node_modules/
 frontend/dist/
 *.sqlite
 .DS_Store
+.gstack/
