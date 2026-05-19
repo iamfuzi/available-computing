@@ -8,5 +8,7 @@ venv/
 node_modules/
 frontend/dist/
 *.sqlite
+*.db
+backend/static/
 .DS_Store
 .gstack/
