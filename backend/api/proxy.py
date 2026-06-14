@@ -23,6 +23,9 @@ _AUTO_RE = re.compile(r"^auto:(" + "|".join(_VALID_CATEGORIES) + r")$")
 # Health priority: healthy (0) > slow (1) > unknown (2) > down (3)
 _HEALTH_ORDER = {"healthy": 0, "slow": 1, "unknown": 2}
 
+# Categories that are not chat-completion targets (excluded from model resolution)
+_NON_CHAT_CATEGORIES = {"image", "video", "embedding", "rerank"}
+
 _proxy_requests: dict[str, list[float]] = {}
 PROXY_RATE_LIMIT = 60
 PROXY_RATE_WINDOW = 60
@@ -74,24 +77,136 @@ def _try_bind_model(model: Model, session: Session):
     return channel, adapter, key
 
 
-def _resolve_model(model_id: str, session: Session):
-    """Find an active free healthy model and its channel. Returns (model, channel, adapter, key)."""
-    candidates = session.exec(
+# Suffix tokens that mark a chat-tuning variant, not a different model family.
+# Stripping these lets "qwen2.5-72b-instruct" normalize to the same key as a
+# bare "qwen2.5-72b" without also collapsing genuinely different ids.
+_VARIANT_SUFFIXES = {
+    "instruct", "chat", "it", "base", "preview", "latest",
+}
+
+# Trailing context-window markers like "-128k" / "-32k" / "-8k" are dropped.
+_CONTEXT_RE = re.compile(r"-\d+k$", re.IGNORECASE)
+
+
+def _normalize_model_id(model_id: str) -> str:
+    """Normalize a model id for tolerant comparison.
+
+    - lowercase
+    - drop a leading ``<org>/`` prefix (e.g. ``Qwen/Qwen2.5-72B`` -> ``qwen2.5-72b``)
+    - drop a trailing ``-<NNN>k`` context marker (e.g. ``-128k``)
+    - drop a trailing known variant token (``-instruct``, ``-chat``, ``-it``...)
+
+    Unknown trailing tokens (e.g. ``-turbo``, ``-vision``) are preserved, so a
+    typo like ``qwen2.5-72b-turbo`` will NOT match the real ``Qwen2.5-72B``.
+    """
+    s = model_id.lower()
+    if "/" in s:
+        s = s.rsplit("/", 1)[-1]
+    s = _CONTEXT_RE.sub("", s)
+    parts = s.split("-")
+    while len(parts) > 1 and parts[-1] in _VARIANT_SUFFIXES:
+        parts.pop()
+    return "-".join(parts)
+
+
+def _chat_candidates(session: Session):
+    """All active, free, non-down chat models. Caller further filters/sorts."""
+    rows = session.exec(
         select(Model)
-        .where(Model.model_id == model_id)
         .where(Model.is_active == True)
         .where(Model.is_free == True)
         .where(Model.health_status != "down")
     ).all()
-    # Exclude non-chat models (image/video generation, embedding)
-    candidates = [m for m in candidates if (m.category or "text") not in _NON_CHAT_CATEGORIES]
+    return [m for m in rows if (m.category or "text") not in _NON_CHAT_CATEGORIES]
 
-    candidates.sort(key=_health_sort_key)
 
+def _pick_best(candidates: list[Model], session: Session, prefer_short_id: bool = False):
+    """Sort by health then latency, return first bindable model + (channel, adapter, key).
+
+    When ``prefer_short_id`` is set (used for tolerant/fuzzy matching tiers), models
+    with a shorter id (no org/variant prefix like ``LoRA/`` or ``Pro/``) are preferred
+    over equally-healthy prefixed siblings, so a bare ``qwen2.5-7b`` resolves to
+    ``Qwen/Qwen2.5-7B-Instruct`` rather than ``LoRA/Qwen/Qwen2.5-7B-Instruct``.
+    """
+    def sort_key(m: Model):
+        priority = _HEALTH_ORDER.get(m.health_status, 3)
+        ms = m.last_response_ms if m.last_response_ms is not None else 999999
+        if prefer_short_id:
+            # health bucket first, then prefer shorter id (no org/variant prefix),
+            # then latency. This avoids a bare "qwen2.5-7b" resolving to a
+            # slightly-faster "LoRA/..." variant instead of the base model.
+            return (priority, len(m.model_id), ms, m.model_id)
+        return (priority, ms)
+    candidates.sort(key=sort_key)
     for model in candidates:
         result = _try_bind_model(model, session)
         if result:
             return model, result[0], result[1], result[2]
+    return None, None, None, None
+
+
+def _suggest_models(model_id: str, all_models: list[Model], limit: int = 5) -> list[str]:
+    """Return closest available model ids for a friendlier 404 message."""
+    needle = _normalize_model_id(model_id)
+    scored: list[tuple[int, str]] = []
+    for m in all_models:
+        norm = _normalize_model_id(m.model_id)
+        if norm == needle:
+            score = 0
+        elif norm.startswith(needle) or needle.startswith(norm):
+            score = 1
+        elif needle in norm or norm in needle:
+            score = 2
+        else:
+            continue
+        scored.append((score, m.model_id))
+    scored.sort(key=lambda x: x[0])
+    # Deduplicate preserving order
+    seen = set()
+    out = []
+    for _, mid in scored:
+        if mid not in seen:
+            seen.add(mid)
+            out.append(mid)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _resolve_model(model_id: str, session: Session):
+    """Find an active free healthy model and its channel.
+
+    Matching is tolerant, in three tiers:
+      1. exact ``model_id`` match
+      2. case-insensitive match
+      3. normalized match (lowercased, org-prefix dropped, variant suffix stripped)
+
+    Returns (model, channel, adapter, key) or (None, None, None, None).
+    """
+    candidates = _chat_candidates(session)
+
+    # Tier 1: exact
+    tier1 = [m for m in candidates if m.model_id == model_id]
+    found = _pick_best(tier1, session)
+    if found[0]:
+        return found
+
+    # Tier 2: case-insensitive (also tolerates org-prefix difference)
+    lowered = model_id.lower()
+    tier2 = [m for m in candidates if m.model_id.lower() == lowered]
+    found = _pick_best(tier2, session, prefer_short_id=True)
+    if found[0]:
+        return found
+
+    # Tier 3: normalized core (drops org prefix + variant suffix).
+    # Always run when normalized yields a real core; it may match even when
+    # the input is already minimal (e.g. "qwen2.5-72b" -> "qwen2.5-72b").
+    norm = _normalize_model_id(model_id)
+    if norm:
+        tier3 = [m for m in candidates if _normalize_model_id(m.model_id) == norm]
+        found = _pick_best(tier3, session, prefer_short_id=True)
+        if found[0]:
+            return found
 
     return None, None, None, None
 
@@ -155,9 +270,6 @@ def _make_openai_error(status_code: int, message: str, error_type: str = "invali
     )
 
 
-_NON_CHAT_CATEGORIES = {"image", "video", "embedding", "rerank"}
-
-
 @router.get("/models")
 def list_openai_models(
     session: Session = Depends(get_session),
@@ -204,7 +316,18 @@ async def chat_completions(
     else:
         model, channel, adapter, key = _resolve_model(body.model, session)
         if not model:
-            return _make_openai_error(404, f"Model '{body.model}' not found or not available", "invalid_request_error", "model")
+            suggestions = _suggest_models(body.model, _chat_candidates(session))
+            hint = (
+                f" Did you mean: {', '.join(suggestions)}?"
+                if suggestions
+                else " Call GET /v1/models to list available ids."
+            )
+            return _make_openai_error(
+                404,
+                f"Model '{body.model}' not found or not available.{hint}",
+                "invalid_request_error",
+                "model",
+            )
 
     payload = _build_openai_payload(body)
     base_url = channel.base_url or adapter.default_base_url
@@ -228,8 +351,11 @@ async def chat_completions(
             error_body = await response.aread()
             await client.aclose()
             ms = int((time.monotonic() - start) * 1000)
-            error_code = "rate_limited" if response.status_code == 429 else "server_error"
-            await record_passive_health(model.id, ms, error_code, channel.id, key)
+            # Only server-side failures (5xx) should mark the model unhealthy.
+            # 4xx are caller-side problems (bad params, auth, etc.) and don't
+            # mean the model is down; 429 means rate-limited, not down.
+            if response.status_code >= 500:
+                await record_passive_health(model.id, ms, "server_error", channel.id, key)
             return JSONResponse(
                 status_code=response.status_code,
                 content={"error": {"message": f"Upstream returned {response.status_code}", "type": "upstream_error"}},
@@ -246,13 +372,13 @@ async def chat_completions(
             r = await client.post(url, json=payload, headers=headers)
         ms = int((time.monotonic() - start) * 1000)
 
-        error_code = None
         if r.status_code == 200:
             await record_passive_health(model.id, ms, None, channel.id, key)
             return JSONResponse(content=r.json(), status_code=200)
         else:
-            error_code = "rate_limited" if r.status_code == 429 else "server_error"
-            await record_passive_health(model.id, ms, error_code, channel.id, key)
+            # See note above: only 5xx marks the model unhealthy.
+            if r.status_code >= 500:
+                await record_passive_health(model.id, ms, "server_error", channel.id, key)
             return JSONResponse(
                 status_code=r.status_code,
                 content={"error": {"message": f"Upstream returned {r.status_code}", "type": "upstream_error"}},
@@ -308,8 +434,9 @@ async def _proxy_gemini(model, channel, adapter, key, payload, session):
         }
         return JSONResponse(content=openai_resp, status_code=200)
     else:
-        error_code = "rate_limited" if r.status_code == 429 else "server_error"
-        await record_passive_health(model.id, ms, error_code, channel.id, key)
+        # Only 5xx means the upstream is actually unhealthy; 4xx/429 are caller-side.
+        if r.status_code >= 500:
+            await record_passive_health(model.id, ms, "server_error", channel.id, key)
         return JSONResponse(
             status_code=r.status_code,
             content={"error": {"message": f"Upstream returned {r.status_code}", "type": "upstream_error"}},
@@ -351,8 +478,9 @@ async def _proxy_gemini_stream(model, channel, adapter, key, payload, session):
     ms = int((time.monotonic() - start) * 1000)
 
     if r.status_code != 200:
-        error_code = "rate_limited" if r.status_code == 429 else "server_error"
-        await record_passive_health(model.id, ms, error_code, channel.id, key)
+        # Only 5xx means the upstream is actually unhealthy; 4xx/429 are caller-side.
+        if r.status_code >= 500:
+            await record_passive_health(model.id, ms, "server_error", channel.id, key)
 
         async def error_gen():
             yield f"data: {json.dumps({'error': {'message': f'Upstream returned {r.status_code}', 'type': 'upstream_error'}})}\n\n"
