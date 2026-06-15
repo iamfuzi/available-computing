@@ -354,7 +354,11 @@ async def chat_completions(
         return await _proxy_gemini(model, channel, adapter, key, payload, session)
 
     url = f"{base_url}/chat/completions"
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/iamfuzi/available-computing",
+    }
 
     if body.stream:
         client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
