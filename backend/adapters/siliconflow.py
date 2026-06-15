@@ -77,6 +77,46 @@ class SiliconFlowAdapter(ProviderAdapter):
                     page += 1
         return models
 
+    async def fetch_free_model_ids(self, key: str, base_url: str) -> Optional[set[str]]:
+        """Fetch the authoritative free-model set via the charging_type filter.
+
+        SiliconFlow's /v1/models endpoint accepts a ``charging_type=free``
+        parameter that returns exactly the currently-free models. This is the
+        only reliable signal (the API exposes no per-model pricing field, and
+        the free catalog changes over time as models move between tiers).
+        """
+        free_ids: set[str] = set()
+        async with httpx.AsyncClient(timeout=15) as client:
+            # The endpoint paginates by type; query each type with the free
+            # filter to build the complete free set.
+            for model_type in ("text", "multimodal", "embedding", "rerank", "audio", "image", "video"):
+                page = 1
+                while True:
+                    try:
+                        r = await client.get(
+                            f"{base_url}/models",
+                            headers={"Authorization": f"Bearer {key}"},
+                            params={"charging_type": "free", "type": model_type, "page": page, "page_size": 100},
+                        )
+                    except (httpx.RequestError, httpx.HTTPStatusError):
+                        # Network/server error: bail out and let the caller fall
+                        # back to other detection methods rather than returning a
+                        # partial (and therefore wrong) free set.
+                        return None
+                    if r.status_code != 200:
+                        # If the filter param isn't supported, this provider
+                        # version can't give us a free list.
+                        return None
+                    items = r.json().get("data") or []
+                    for it in items:
+                        mid = it.get("id")
+                        if mid:
+                            free_ids.add(mid)
+                    if len(items) < 100:
+                        break
+                    page += 1
+        return free_ids
+
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
         # SiliconFlow official convention: paid variants carry a "Pro/" prefix
         # while free variants keep the original name (e.g. "Qwen/Qwen2.5-7B-Instruct"

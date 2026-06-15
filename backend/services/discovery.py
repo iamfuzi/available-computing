@@ -10,7 +10,21 @@ from services.whitelist import whitelist
 from services import events
 
 
-def _determine_free(model: ModelInfo, provider_id: str, adapter) -> dict:
+def _determine_free(model: ModelInfo, provider_id: str, adapter, free_id_set: set[str] | None = None) -> dict:
+    """Determine if a model is free using a tiered strategy.
+
+    ``free_id_set`` is the authoritative set of currently-free model ids
+    fetched from the provider's API (e.g. SiliconFlow's charging_type=free
+    endpoint). When present it is the highest-priority signal and overrides
+    every other method, because it reflects the live billing catalog rather
+    than a static rule or whitelist.
+    """
+    # Step 0: authoritative API-fetched free set (highest priority)
+    if free_id_set is not None:
+        if model.model_id in free_id_set:
+            return {"is_free": True, "free_type": "permanent", "free_source": "api_free_set"}
+        return {"is_free": False, "free_type": "permanent", "free_source": "api_free_set"}
+
     # Step 1: whole-provider free flag
     if whitelist.is_provider_all_free(provider_id):
         return {
@@ -64,6 +78,12 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
 
     raw_models = await adapter.list_models(decrypted_key, base_url)
 
+    # Fetch the authoritative free-model set from the provider's API. When the
+    # provider supports this (SiliconFlow's charging_type=free), it overrides
+    # the static whitelist + prefix rules — it's the only signal that tracks
+    # the live billing catalog. Failures fall back to other detection methods.
+    free_id_set = await adapter.fetch_free_model_ids(decrypted_key, base_url)
+
     with Session(engine) as session:
         # Mark all existing models for this channel as potentially inactive
         existing: dict[str, Model] = {
@@ -72,7 +92,7 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
         }
 
         for raw in raw_models:
-            free_info = _determine_free(raw, channel.provider_type, adapter)
+            free_info = _determine_free(raw, channel.provider_type, adapter, free_id_set)
 
             # Whitelist may supply category override
             wl_entry = whitelist.match(channel.provider_type, raw.model_id)

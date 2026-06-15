@@ -56,6 +56,18 @@ class ProviderAdapter(ABC):
         - None                                   — unknown, defer to whitelist
         """
 
+    async def fetch_free_model_ids(self, key: str, base_url: str) -> Optional[set[str]]:
+        """
+        Fetch the authoritative set of currently-free model ids from the
+        provider's API (e.g. a dedicated "free models" endpoint).
+
+        Returns the set of free model ids, or None if the provider does not
+        expose such an endpoint (in which case detection falls back to
+        detect_free_from_api / whitelist). The default implementation returns
+        None so adapters without a free-listing endpoint are unaffected.
+        """
+        return None
+
     @abstractmethod
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         """Send a minimal probe request and return the health result."""

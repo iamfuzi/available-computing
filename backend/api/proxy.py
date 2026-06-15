@@ -109,29 +109,17 @@ def _normalize_model_id(model_id: str) -> str:
     return "-".join(parts)
 
 
-def _sf_channel_ids(session: Session) -> set[str]:
-    """Cache SiliconFlow channel ids in the session for prefix guards."""
-    cached = getattr(session, "_sf_channel_ids", None)
-    if cached is None:
-        cached = {
-            c.id for c in session.exec(
-                select(Channel).where(Channel.provider_type == "siliconflow")
-            ).all()
-        }
-        session._sf_channel_ids = cached  # type: ignore[attr-defined]
-    return cached
-
-
 def _is_pool_eligible(model: Model, session: Session) -> bool:
-    """Whether a model may appear in the free pool (both /v1/models and resolution).
+    """Whether a model may appear in the free pool.
 
-    Excludes non-chat categories and SiliconFlow "Pro/" paid variants. The Pro/
-    guard is a safety net for legacy DB rows that predate the discovery-layer
-    rule; newly discovered models are already flagged correctly.
+    Excludes non-chat categories. Free/paid status is trusted from the model's
+    is_free flag, which is set authoritatively during discovery via the
+    provider's free-model API (SiliconFlow charging_type=free) or the static
+    whitelist as a fallback. We intentionally do NOT hard-exclude "Pro/"-prefixed
+    ids here: the authoritative API sometimes marks Pro/ variants as free
+    (e.g. promotional free tiers), and overriding that would be wrong.
     """
     if (model.category or "text") in _NON_CHAT_CATEGORIES:
-        return False
-    if model.model_id.startswith("Pro/") and model.channel_id in _sf_channel_ids(session):
         return False
     return True
 
