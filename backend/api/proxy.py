@@ -109,6 +109,33 @@ def _normalize_model_id(model_id: str) -> str:
     return "-".join(parts)
 
 
+def _sf_channel_ids(session: Session) -> set[str]:
+    """Cache SiliconFlow channel ids in the session for prefix guards."""
+    cached = getattr(session, "_sf_channel_ids", None)
+    if cached is None:
+        cached = {
+            c.id for c in session.exec(
+                select(Channel).where(Channel.provider_type == "siliconflow")
+            ).all()
+        }
+        session._sf_channel_ids = cached  # type: ignore[attr-defined]
+    return cached
+
+
+def _is_pool_eligible(model: Model, session: Session) -> bool:
+    """Whether a model may appear in the free pool (both /v1/models and resolution).
+
+    Excludes non-chat categories and SiliconFlow "Pro/" paid variants. The Pro/
+    guard is a safety net for legacy DB rows that predate the discovery-layer
+    rule; newly discovered models are already flagged correctly.
+    """
+    if (model.category or "text") in _NON_CHAT_CATEGORIES:
+        return False
+    if model.model_id.startswith("Pro/") and model.channel_id in _sf_channel_ids(session):
+        return False
+    return True
+
+
 def _chat_candidates(session: Session):
     """All active, free, non-down chat models. Caller further filters/sorts."""
     rows = session.exec(
@@ -117,7 +144,7 @@ def _chat_candidates(session: Session):
         .where(Model.is_free == True)
         .where(Model.health_status != "down")
     ).all()
-    return [m for m in rows if (m.category or "text") not in _NON_CHAT_CATEGORIES]
+    return [m for m in rows if _is_pool_eligible(m, session)]
 
 
 def _pick_best(candidates: list[Model], session: Session, prefer_short_id: bool = False):
@@ -284,7 +311,7 @@ def list_openai_models(
 
     data = []
     for m in models:
-        if (m.category or "text") in _NON_CHAT_CATEGORIES:
+        if not _is_pool_eligible(m, session):
             continue
         data.append({
             "id": m.model_id,
