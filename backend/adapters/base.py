@@ -48,7 +48,12 @@ class ProviderAdapter(ABC):
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
         """
         Inspect the API response fields to determine if a model is free.
-        Returns {"is_free": True, "free_type": "permanent"} or None if unknown.
+
+        Returns one of:
+        - {"is_free": True,  "free_type": ...}  — confirmed free
+        - {"is_free": False, "free_type": ...}  — confirmed paid (e.g. by a
+          naming convention such as SiliconFlow's "Pro/" prefix)
+        - None                                   — unknown, defer to whitelist
         """
 
     @abstractmethod

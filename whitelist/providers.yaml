@@ -49,12 +49,9 @@ providers:
       - id: "BAAI/bge-reranker-v2-m3"
         free_type: permanent
         category: rerank
-      - id: "Pro/BAAI/bge-m3"
-        free_type: permanent
-        category: embedding
-      - id: "Pro/BAAI/bge-reranker-v2-m3"
-        free_type: permanent
-        category: rerank
+      # NOTE: "Pro/" prefixed models are paid per SiliconFlow convention
+      # (free variants keep the original name). They are excluded from this
+      # whitelist; detect_free_from_api enforces the prefix rule instead.
       - id: "Qwen/Qwen3-Embedding-0.6B"
         free_type: permanent
         category: embedding

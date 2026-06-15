@@ -78,7 +78,15 @@ class SiliconFlowAdapter(ProviderAdapter):
         return models
 
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
-        # SiliconFlow marks free models with pricing fields or tags in the raw response
+        # SiliconFlow official convention: paid variants carry a "Pro/" prefix
+        # while free variants keep the original name (e.g. "Qwen/Qwen2.5-7B-Instruct"
+        # is free, "Pro/Qwen/Qwen2.5-7B-Instruct" is paid). The /v1/models API
+        # exposes no pricing field, so this prefix rule is the only deterministic
+        # signal available.
+        if model.model_id.startswith("Pro/"):
+            return {"is_free": False, "free_type": "permanent", "free_source": "prefix_rule"}
+        # Fall back to API fields for forward-compatibility (in case SiliconFlow
+        # starts returning pricing/tags in the future).
         raw = model.raw
         pricing = raw.get("pricing") or {}
         if pricing.get("input") == "0" or pricing.get("input") == 0:

@@ -19,13 +19,17 @@ def _determine_free(model: ModelInfo, provider_id: str, adapter) -> dict:
             "free_source": "provider_free",
         }
 
-    # Step 2: API response fields
+    # Step 2: API response fields / naming convention
     result = adapter.detect_free_from_api(model)
     if result:
+        # A definitive verdict (True=free or False=paid) short-circuits here.
+        # The "Pro/ prefix = paid" rule relies on this: once an adapter says
+        # is_free=False, we must NOT fall through to the whitelist (which could
+        # otherwise re-mark a Pro/ model as free).
         return {
             "is_free": result["is_free"],
             "free_type": result.get("free_type", "permanent"),
-            "free_source": "api_field",
+            "free_source": result.get("free_source", "api_field"),
         }
 
     # Step 3: whitelist
