@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 from database import engine
 from models import Model, HealthRecord
 from adapters import get_adapter
-from config import PROBE_TIMEOUT_SECONDS
+from config import PROBE_TIMEOUT_SECONDS, BILLING_FAILURE_THRESHOLD
 
 
 async def record_passive_health(
@@ -42,6 +42,39 @@ async def record_passive_health(
             m.last_real_call_at = datetime.now(timezone.utc)
             session.add(m)
 
+        session.commit()
+
+
+def record_billing_failure(model_id: str, status_code: int, session: Session) -> bool:
+    """Record a billing/auth failure (401/403) against a free-flagged model.
+
+    Increments ``consecutive_billing_failures``; when it reaches
+    ``BILLING_FAILURE_THRESHOLD`` the model is downgraded out of the free pool
+    (``is_free = None``, ``free_type = "billing_suspect"``). Returns True if a
+    downgrade occurred this call.
+
+    Only affects models currently flagged free — a model already known to be
+    paid or unknown is left alone, since a 401 there carries no new signal.
+    """
+    m = session.get(Model, model_id)
+    if not m or m.is_free is not True:
+        return False
+    m.consecutive_billing_failures += 1
+    if m.consecutive_billing_failures >= BILLING_FAILURE_THRESHOLD:
+        m.is_free = None
+        m.free_type = "billing_suspect"
+        m.free_source = "passive_downgrade"
+    session.add(m)
+    session.commit()
+    return m.is_free is None
+
+
+def clear_billing_failures(model_id: str, session: Session) -> None:
+    """Reset the billing-failure counter on a successful call."""
+    m = session.get(Model, model_id)
+    if m and m.consecutive_billing_failures != 0:
+        m.consecutive_billing_failures = 0
+        session.add(m)
         session.commit()
 
 

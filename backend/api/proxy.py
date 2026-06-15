@@ -12,7 +12,7 @@ from database import get_session
 from models import Model, Channel
 from api.auth import verify_token_or_apikey
 from api.channels import _decrypt_key
-from services.health import record_passive_health
+from services.health import record_passive_health, record_billing_failure, clear_billing_failures
 from adapters import get_adapter
 
 router = APIRouter()
@@ -356,6 +356,11 @@ async def chat_completions(
             # mean the model is down; 429 means rate-limited, not down.
             if response.status_code >= 500:
                 await record_passive_health(model.id, ms, "server_error", channel.id, key)
+            # 401/403 = auth/billing failure: count it; repeated failures downgrade
+            # a free-flagged model out of the pool (its key may have been revoked or
+            # the upstream turned it paid).
+            if response.status_code in (401, 403):
+                record_billing_failure(model.id, response.status_code, session)
             return JSONResponse(
                 status_code=response.status_code,
                 content={"error": {"message": f"Upstream returned {response.status_code}", "type": "upstream_error"}},
@@ -374,11 +379,14 @@ async def chat_completions(
 
         if r.status_code == 200:
             await record_passive_health(model.id, ms, None, channel.id, key)
+            clear_billing_failures(model.id, session)
             return JSONResponse(content=r.json(), status_code=200)
         else:
             # See note above: only 5xx marks the model unhealthy.
             if r.status_code >= 500:
                 await record_passive_health(model.id, ms, "server_error", channel.id, key)
+            if r.status_code in (401, 403):
+                record_billing_failure(model.id, r.status_code, session)
             return JSONResponse(
                 status_code=r.status_code,
                 content={"error": {"message": f"Upstream returned {r.status_code}", "type": "upstream_error"}},
@@ -419,6 +427,7 @@ async def _proxy_gemini(model, channel, adapter, key, payload, session):
 
     if r.status_code == 200:
         await record_passive_health(model.id, ms, None, channel.id, key)
+        clear_billing_failures(model.id, session)
         # Convert Gemini response to OpenAI format
         gemini_resp = r.json()
         text = ""
@@ -437,6 +446,8 @@ async def _proxy_gemini(model, channel, adapter, key, payload, session):
         # Only 5xx means the upstream is actually unhealthy; 4xx/429 are caller-side.
         if r.status_code >= 500:
             await record_passive_health(model.id, ms, "server_error", channel.id, key)
+        if r.status_code in (401, 403):
+            record_billing_failure(model.id, r.status_code, session)
         return JSONResponse(
             status_code=r.status_code,
             content={"error": {"message": f"Upstream returned {r.status_code}", "type": "upstream_error"}},
@@ -481,6 +492,8 @@ async def _proxy_gemini_stream(model, channel, adapter, key, payload, session):
         # Only 5xx means the upstream is actually unhealthy; 4xx/429 are caller-side.
         if r.status_code >= 500:
             await record_passive_health(model.id, ms, "server_error", channel.id, key)
+        if r.status_code in (401, 403):
+            record_billing_failure(model.id, r.status_code, session)
 
         async def error_gen():
             yield f"data: {json.dumps({'error': {'message': f'Upstream returned {r.status_code}', 'type': 'upstream_error'}})}\n\n"
@@ -488,6 +501,7 @@ async def _proxy_gemini_stream(model, channel, adapter, key, payload, session):
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
     await record_passive_health(model.id, ms, None, channel.id, key)
+    clear_billing_failures(model.id, session)
 
     text = ""
     for cand in r.json().get("candidates", []):

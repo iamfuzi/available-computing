@@ -22,3 +22,4 @@ class Model(SQLModel, table=True):
     last_checked_at: Optional[datetime] = None
     last_real_call_at: Optional[datetime] = None
     is_active: bool = Field(default=True, index=True)
+    consecutive_billing_failures: int = Field(default=0)

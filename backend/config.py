@@ -28,6 +28,11 @@ JWT_EXPIRE_DAYS = 7
 PROBE_TIMEOUT_SECONDS = 10
 SLOW_RESPONSE_THRESHOLD_MS = int(os.environ.get("SLOW_THRESHOLD_MS", "1000"))
 
+# Passive billing-failure downgrade: consecutive 401/403 (auth/billing) failures
+# after which a free-flagged model is moved out of the free pool. A successful
+# call resets the counter to 0.
+BILLING_FAILURE_THRESHOLD = int(os.environ.get("BILLING_FAILURE_THRESHOLD", "3"))
+
 
 def get_admin_password() -> str:
     password_file = os.environ.get("ADMIN_PASSWORD_FILE")
