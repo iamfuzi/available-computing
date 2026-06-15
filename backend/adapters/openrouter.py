@@ -114,7 +114,10 @@ class OpenRouterAdapter(ProviderAdapter):
                 observed_remaining=parse_remaining_headers(r),
             )
         if r.status_code == 429:
-            return HealthInfo(status="down", response_ms=response_ms, error_code="rate_limited",
+            # 429 means the model is online but currently rate-limited — it's not
+            # down. Mark it slow so it stays in the pool at lower priority rather
+            # than being excluded entirely.
+            return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited",
                               observed_rate_limit=parse_rate_limit_headers(r),
                               observed_remaining=parse_remaining_headers(r))
         if r.status_code in (401, 403):

@@ -169,7 +169,8 @@ class SiliconFlowAdapter(ProviderAdapter):
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(status=status, response_ms=response_ms)
         if r.status_code == 429:
-            return HealthInfo(status="down", response_ms=response_ms, error_code="rate_limited")
+            # Rate-limited, not down — keep the model in the pool at lower priority.
+            return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited")
         if r.status_code in (401, 403):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
         return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
@@ -199,7 +200,8 @@ class SiliconFlowAdapter(ProviderAdapter):
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(status=status, response_ms=response_ms)
         if r.status_code == 429:
-            return HealthInfo(status="down", response_ms=response_ms, error_code="rate_limited")
+            # Rate-limited, not down — keep the model in the pool at lower priority.
+            return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited")
         if r.status_code in (401, 403):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
         return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
@@ -239,7 +241,8 @@ class SiliconFlowAdapter(ProviderAdapter):
                 observed_remaining=parse_remaining_headers(r),
             )
         if r.status_code == 429:
-            return HealthInfo(status="down", response_ms=response_ms, error_code="rate_limited",
+            # Rate-limited, not down — keep the model in the pool at lower priority.
+            return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited",
                               observed_rate_limit=parse_rate_limit_headers(r),
                               observed_remaining=parse_remaining_headers(r))
         if r.status_code in (401, 403):

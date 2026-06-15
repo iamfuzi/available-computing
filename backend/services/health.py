@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 from database import engine
 from models import Model, HealthRecord
 from adapters import get_adapter
-from config import PROBE_TIMEOUT_SECONDS, BILLING_FAILURE_THRESHOLD
+from config import PROBE_TIMEOUT_SECONDS, BILLING_FAILURE_THRESHOLD, PROBE_INTERVAL_BETWEEN_MODELS_SEC
 
 
 async def record_passive_health(
@@ -164,7 +164,14 @@ def _get_daily_limit(model: Model) -> int | None:
 
 
 async def probe_all_stale_models(get_key_fn=None):
-    """Active-probe all models with no real call in the past 4 hours."""
+    """Active-probe all models with no real call in the past 4 hours.
+
+    Models are grouped by channel and probed sequentially within a channel
+    (with a small delay between requests), while different channels run
+    concurrently. This avoids hammering a single provider with 20 simultaneous
+    probes — which is what triggers 429s on rate-limited free tiers (notably
+    OpenRouter's :free models, where the daily request budget is tiny).
+    """
     from models import Channel
 
     # Batch load all channels and decrypt keys in a single session
@@ -179,21 +186,33 @@ async def probe_all_stale_models(get_key_fn=None):
         from config import get_admin_password
         salt = _get_salt(session)
 
-        work_items = []
+        # Group work items by channel id
+        by_channel: dict[str, list[tuple[Model, str]]] = {}
         for m in stale_models:
             ch = channels.get(m.channel_id)
             if not ch or not ch.enabled:
                 continue
             key = _decrypt(ch.api_key_enc, get_admin_password(), salt)
-            work_items.append((m, key))
+            by_channel.setdefault(m.channel_id, []).append((m, key))
 
-    semaphore = asyncio.Semaphore(20)
+    async def probe_channel_sequential(items: list[tuple[Model, str]]):
+        """Probe one channel's models sequentially with a delay between each.
 
-    async def bounded(coro):
-        async with semaphore:
-            return await coro
+        The delay spaces requests so a single provider doesn't see a burst
+        large enough to trip its rate limiter during a probe sweep.
+        """
+        for m, key in items:
+            try:
+                await active_probe(m, key)
+            except Exception:
+                pass  # active_probe handles its own errors; swallow unexpected ones
+            await asyncio.sleep(PROBE_INTERVAL_BETWEEN_MODELS_SEC)
 
-    await asyncio.gather(*[bounded(active_probe(m, key)) for m, key in work_items], return_exceptions=True)
+    # Run each channel's sequential probe concurrently with the others.
+    await asyncio.gather(
+        *[probe_channel_sequential(items) for items in by_channel.values()],
+        return_exceptions=True,
+    )
 
 
 async def probe_channel_models(channel_id: str):

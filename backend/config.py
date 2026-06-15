@@ -27,6 +27,11 @@ JWT_EXPIRE_DAYS = 7
 
 PROBE_TIMEOUT_SECONDS = 10
 SLOW_RESPONSE_THRESHOLD_MS = int(os.environ.get("SLOW_THRESHOLD_MS", "1000"))
+# Delay between consecutive probes to models on the same channel, to avoid
+# tripping per-provider rate limits during a probe sweep. Free tiers on
+# providers like OpenRouter have very small daily budgets and a burst of
+# simultaneous probes reliably returns 429 for every model.
+PROBE_INTERVAL_BETWEEN_MODELS_SEC = float(os.environ.get("PROBE_INTERVAL_BETWEEN_MODELS_SEC", "2"))
 
 # Passive billing-failure downgrade: consecutive 401/403 (auth/billing) failures
 # after which a free-flagged model is moved out of the free pool. A successful
