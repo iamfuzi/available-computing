@@ -33,6 +33,15 @@ SLOW_RESPONSE_THRESHOLD_MS = int(os.environ.get("SLOW_THRESHOLD_MS", "1000"))
 # call resets the counter to 0.
 BILLING_FAILURE_THRESHOLD = int(os.environ.get("BILLING_FAILURE_THRESHOLD", "3"))
 
+# SiliconFlow release-notes sync: periodically decommission models that the
+# upstream has officially retired, so the pool doesn't keep dead entries that
+# match by name but fail every call. Set to empty to disable.
+SF_RELEASE_NOTES_URL = os.environ.get(
+    "SF_RELEASE_NOTES_URL",
+    "https://docs.siliconflow.cn/cn/release-notes/overview.md",
+)
+SF_RELEASE_SYNC_ENABLED = os.environ.get("SF_RELEASE_SYNC_ENABLED", "true").lower() in ("1", "true", "yes")
+
 
 def get_admin_password() -> str:
     password_file = os.environ.get("ADMIN_PASSWORD_FILE")

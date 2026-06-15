@@ -54,6 +54,17 @@ def init_scheduler(get_key_fn=None):
         replace_existing=True,
     )
 
+    # Monthly: decommission models that SiliconFlow has officially retired, so
+    # the pool doesn't keep entries that fail every call. Runs on day 1 at 04:00
+    # to avoid colliding with the daily cleanup (00:00).
+    from services.sf_release_sync import sync_sf_decommissioned_models
+    scheduler.add_job(
+        sync_sf_decommissioned_models,
+        CronTrigger(day=1, hour=4, minute=0),
+        id="sync_sf_release",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
 
