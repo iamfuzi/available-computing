@@ -70,11 +70,14 @@ class OpenRouterAdapter(ProviderAdapter):
 
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
         pricing = model.raw.get("pricing", {})
-        prompt_price = pricing.get("prompt", "1")
-        completion_price = pricing.get("completion", "1")
-        if prompt_price == "0" and completion_price == "0":
-            return {"is_free": True, "free_type": "permanent"}
-        return None
+        try:
+            prompt_price = float(pricing.get("prompt", 1))
+            completion_price = float(pricing.get("completion", 1))
+            if prompt_price == 0.0 and completion_price == 0.0:
+                return {"is_free": True, "free_type": "permanent"}
+            return {"is_free": False}
+        except (ValueError, TypeError):
+            return None
 
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         payload = {
