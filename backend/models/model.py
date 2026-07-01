@@ -21,5 +21,10 @@ class Model(SQLModel, table=True):
     last_response_ms: Optional[int] = None
     last_checked_at: Optional[datetime] = None
     last_real_call_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    rate_limited_until: Optional[datetime] = None
+    last_429_at: Optional[datetime] = None
+    consecutive_429: int = Field(default=0)
     is_active: bool = Field(default=True, index=True)
     consecutive_billing_failures: int = Field(default=0)
+    param_size: Optional[float] = None      # billions, used by auto:smart routing

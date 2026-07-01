@@ -12,6 +12,7 @@ class WhitelistEntry:
     rate_limit: Optional[dict] = None
     notes: Optional[str] = None
     category: Optional[str] = None
+    param_size: Optional[float] = None      # billions, fallback for ids that can't be parsed
 
 
 class WhitelistManager:
@@ -48,6 +49,7 @@ class WhitelistManager:
                     rate_limit=entry.get("rate_limit"),
                     notes=entry.get("notes"),
                     category=entry.get("category"),
+                    param_size=entry.get("param_size"),
                 )
         return None
 

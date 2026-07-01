@@ -61,7 +61,7 @@ def _run_migrations() -> None:
 
     # No alembic_version table yet. Decide whether the schema is already current.
     existing_cols = {c["name"] for c in insp.get_columns("model")}
-    needed_cols = {"consecutive_billing_failures"}
+    needed_cols = {"consecutive_billing_failures", "param_size"}
     if needed_cols.issubset(existing_cols):
         # Schema is already at head (create_all built it fresh); just record it.
         if head_rev:

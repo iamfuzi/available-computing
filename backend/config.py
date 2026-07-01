@@ -38,6 +38,15 @@ PROBE_INTERVAL_BETWEEN_MODELS_SEC = float(os.environ.get("PROBE_INTERVAL_BETWEEN
 # call resets the counter to 0.
 BILLING_FAILURE_THRESHOLD = int(os.environ.get("BILLING_FAILURE_THRESHOLD", "3"))
 
+# Local proxy rate limits. API-key scoped limits are the primary guard for
+# third-party integrations; IP fallback is intentionally looser so shared NATs
+# do not make unrelated API keys trip over each other.
+PROXY_RATE_WINDOW_SECONDS = int(os.environ.get("PROXY_RATE_WINDOW_SECONDS", "60"))
+PROXY_API_KEY_RATE_LIMIT = int(os.environ.get("PROXY_API_KEY_RATE_LIMIT", "120"))
+PROXY_ADMIN_RATE_LIMIT = int(os.environ.get("PROXY_ADMIN_RATE_LIMIT", "600"))
+PROXY_IP_FALLBACK_RATE_LIMIT = int(os.environ.get("PROXY_IP_FALLBACK_RATE_LIMIT", "600"))
+PROXY_MODEL_CONCURRENCY_LIMIT = int(os.environ.get("PROXY_MODEL_CONCURRENCY_LIMIT", "2"))
+
 # SiliconFlow release-notes sync: periodically decommission models that the
 # upstream has officially retired, so the pool doesn't keep dead entries that
 # match by name but fail every call. Set to empty to disable.

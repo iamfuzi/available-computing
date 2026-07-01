@@ -97,9 +97,13 @@ class OpenRouterAdapter(ProviderAdapter):
                     json=payload,
                 )
         except httpx.TimeoutException:
-            return HealthInfo(status="down", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+            # Transient — a slow/queued provider (notably OpenRouter :free
+            # models) shouldn't be ejected from the pool on a single timeout.
+            return HealthInfo(status="slow", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
         except httpx.RequestError:
-            return HealthInfo(status="down", response_ms=0, error_code="network_error")
+            # Network blips are transient too; keep the model at lower priority
+            # rather than marking it down.
+            return HealthInfo(status="slow", response_ms=0, error_code="network_error")
 
         response_ms = int((time.monotonic() - start) * 1000)
 
@@ -127,4 +131,8 @@ class OpenRouterAdapter(ProviderAdapter):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
         if r.status_code == 404:
             return HealthInfo(status="down", response_ms=response_ms, error_code="not_found")
-        return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
+        # 5xx is almost always a transient upstream issue (OpenRouter is an
+        # aggregator, so a single backing provider error shouldn't drop the
+        # model out of the pool). Mark slow so it stays available at lower
+        # priority and recovers on the next probe.
+        return HealthInfo(status="slow", response_ms=response_ms, error_code="server_error")

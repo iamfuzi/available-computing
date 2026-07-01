@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select, func
+from datetime import datetime, timezone
 
 from database import get_session
 from models import Channel, Model
@@ -21,15 +22,24 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
         .where(Model.is_active == True)
     ).all()
 
-    health_dist = {"healthy": 0, "slow": 0, "down": 0, "unknown": 0}
+    health_dist = {"healthy": 0, "slow": 0, "down": 0, "unknown": 0, "rate_limited": 0}
+    now = datetime.now(timezone.utc)
     for m in free_models:
-        health_dist[m.health_status] = health_dist.get(m.health_status, 0) + 1
+        status = m.health_status
+        if m.rate_limited_until:
+            until = m.rate_limited_until
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            if until > now:
+                status = "rate_limited"
+        health_dist[status] = health_dist.get(status, 0) + 1
 
-    usable = sum(v for k, v in health_dist.items() if k != "down")
+    usable = health_dist.get("healthy", 0)
 
     return {
         "total_channels": total_channels,
         "enabled_channels": enabled_channels,
-        "free_model_count": usable,
+        "free_model_count": len(free_models),
+        "available_model_count": usable,
         "health_distribution": health_dist,
     }

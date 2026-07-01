@@ -12,7 +12,20 @@ def _infer_category(model_id: str) -> str:
         return "rerank"
     if any(k in lower for k in ("embedding", "bge", "e5")):
         return "embedding"
-    if any(k in lower for k in ("vision", "vl", "internvl", "qwen-vl")):
+    if any(k in lower for k in (
+        "vision",
+        "ocr",
+        "captioner",
+        "image-edit",
+        "qwen-image",
+        "omni",
+        "vl",
+        "internvl",
+        "qwen-vl",
+        "glm-4v",
+        "glm-4.1v",
+        "glm-4.5v",
+    )):
         return "vision"
     if any(k in lower for k in ("coder", "code", "deepseek-coder")):
         return "code"
@@ -155,9 +168,9 @@ class SiliconFlowAdapter(ProviderAdapter):
                     json=payload,
                 )
         except httpx.TimeoutException:
-            return HealthInfo(status="down", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+            return HealthInfo(status="slow", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
         except httpx.RequestError:
-            return HealthInfo(status="down", response_ms=0, error_code="network_error")
+            return HealthInfo(status="slow", response_ms=0, error_code="network_error")
         response_ms = int((time.monotonic() - start) * 1000)
         if r.status_code == 200:
             try:
@@ -173,7 +186,7 @@ class SiliconFlowAdapter(ProviderAdapter):
             return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited")
         if r.status_code in (401, 403):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
-        return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
+        return HealthInfo(status="slow", response_ms=response_ms, error_code="server_error")
 
     async def _health_check_rerank(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         payload = {"model": model_id, "query": "hello", "documents": ["hi", "world"]}
@@ -186,9 +199,9 @@ class SiliconFlowAdapter(ProviderAdapter):
                     json=payload,
                 )
         except httpx.TimeoutException:
-            return HealthInfo(status="down", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+            return HealthInfo(status="slow", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
         except httpx.RequestError:
-            return HealthInfo(status="down", response_ms=0, error_code="network_error")
+            return HealthInfo(status="slow", response_ms=0, error_code="network_error")
         response_ms = int((time.monotonic() - start) * 1000)
         if r.status_code == 200:
             try:
@@ -204,7 +217,7 @@ class SiliconFlowAdapter(ProviderAdapter):
             return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited")
         if r.status_code in (401, 403):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
-        return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
+        return HealthInfo(status="slow", response_ms=response_ms, error_code="server_error")
 
     async def _health_check_chat(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         payload = {
@@ -221,9 +234,9 @@ class SiliconFlowAdapter(ProviderAdapter):
                     json=payload,
                 )
         except httpx.TimeoutException:
-            return HealthInfo(status="down", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+            return HealthInfo(status="slow", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
         except httpx.RequestError:
-            return HealthInfo(status="down", response_ms=0, error_code="network_error")
+            return HealthInfo(status="slow", response_ms=0, error_code="network_error")
 
         response_ms = int((time.monotonic() - start) * 1000)
 
@@ -249,4 +262,4 @@ class SiliconFlowAdapter(ProviderAdapter):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
         if r.status_code == 404:
             return HealthInfo(status="down", response_ms=response_ms, error_code="not_found")
-        return HealthInfo(status="down", response_ms=response_ms, error_code="server_error")
+        return HealthInfo(status="slow", response_ms=response_ms, error_code="server_error")

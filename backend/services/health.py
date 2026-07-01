@@ -40,8 +40,65 @@ async def record_passive_health(
             m.last_response_ms = response_ms
             m.last_checked_at = datetime.now(timezone.utc)
             m.last_real_call_at = datetime.now(timezone.utc)
+            if status == "healthy":
+                m.last_success_at = datetime.now(timezone.utc)
+                m.consecutive_429 = 0
+                m.rate_limited_until = None
             session.add(m)
 
+        session.commit()
+
+
+def record_rate_limit(
+    model_id: str,
+    retry_after_seconds: int | None,
+    session: Session,
+    response_ms: int | None = None,
+) -> int:
+    """Put a model into a short cooldown after an upstream 429.
+
+    If the provider did not send Retry-After, use a small exponential backoff so
+    repeated requests do not keep selecting the same exhausted free-tier model.
+    Returns the effective cooldown in seconds for structured error responses.
+    """
+    now = datetime.now(timezone.utc)
+    m = session.get(Model, model_id)
+    if not m:
+        return retry_after_seconds or 60
+
+    m.consecutive_429 += 1
+    fallback = min(900, 60 * (2 ** max(0, m.consecutive_429 - 1)))
+    cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else fallback
+    session.add(HealthRecord(
+        model_id=model_id,
+        status="rate_limited",
+        response_ms=response_ms,
+        error_code="rate_limited",
+        is_passive=True,
+    ))
+    m.health_status = "rate_limited"
+    m.last_429_at = now
+    m.last_checked_at = now
+    m.rate_limited_until = now + timedelta(seconds=cooldown)
+    session.add(m)
+    session.commit()
+    return cooldown
+
+
+def clear_rate_limit(model_id: str, session: Session) -> None:
+    """Clear cooldown state after a successful upstream call."""
+    m = session.get(Model, model_id)
+    if not m:
+        return
+    changed = False
+    if m.consecutive_429 != 0:
+        m.consecutive_429 = 0
+        changed = True
+    if m.rate_limited_until is not None:
+        m.rate_limited_until = None
+        changed = True
+    if changed:
+        session.add(m)
         session.commit()
 
 
@@ -59,6 +116,15 @@ def record_billing_failure(model_id: str, status_code: int, session: Session) ->
     m = session.get(Model, model_id)
     if not m or m.is_free is not True:
         return False
+    now = datetime.now(timezone.utc)
+    session.add(HealthRecord(
+        model_id=model_id,
+        status="down",
+        error_code=f"upstream_{status_code}",
+        is_passive=True,
+    ))
+    m.health_status = "down"
+    m.last_checked_at = now
     m.consecutive_billing_failures += 1
     if m.consecutive_billing_failures >= BILLING_FAILURE_THRESHOLD:
         m.is_free = None
@@ -76,6 +142,36 @@ def clear_billing_failures(model_id: str, session: Session) -> None:
         m.consecutive_billing_failures = 0
         session.add(m)
         session.commit()
+
+
+def record_channel_billing_failure(channel_id: str, status_code: int, session: Session) -> None:
+    """Mark all free active models in a channel down after an account-level
+    billing/auth failure.
+
+    Some providers return a valid free catalog while the account cannot run any
+    model (for example, SiliconFlow code 30001: insufficient balance). Treating
+    that as model-specific makes routing burn through dozens of doomed
+    candidates. Active probes can restore individual models later.
+    """
+    now = datetime.now(timezone.utc)
+    models = session.exec(
+        select(Model)
+        .where(Model.channel_id == channel_id)
+        .where(Model.is_active == True)
+        .where(Model.is_free == True)
+    ).all()
+    for m in models:
+        m.health_status = "down"
+        m.last_checked_at = now
+        m.consecutive_billing_failures += 1
+        session.add(HealthRecord(
+            model_id=m.id,
+            status="down",
+            error_code=f"channel_upstream_{status_code}",
+            is_passive=True,
+        ))
+        session.add(m)
+    session.commit()
 
 
 async def active_probe(model: Model, decrypted_key: str):
@@ -98,11 +194,6 @@ async def active_probe(model: Model, decrypted_key: str):
             if probe_count >= daily_limit * 0.05:
                 return
 
-    with Session(engine) as session:
-        channel = session.exec(
-            select(Model).where(Model.id == model.id)
-        ).first()
-
     from models import Channel
     with Session(engine) as session:
         channel = session.get(Channel, model.channel_id)
@@ -115,6 +206,10 @@ async def active_probe(model: Model, decrypted_key: str):
     health = await adapter.health_check(model.model_id, decrypted_key, base_url)
 
     with Session(engine) as session:
+        if health.error_code == "rate_limited":
+            record_rate_limit(model.id, None, session, health.response_ms)
+            return
+
         record = HealthRecord(
             model_id=model.id,
             status=health.status,
@@ -126,15 +221,13 @@ async def active_probe(model: Model, decrypted_key: str):
 
         m = session.get(Model, model.id)
         if m:
-            # Don't mark down on network errors — likely transient
-            if health.error_code == "network_error":
-                m.last_checked_at = datetime.now(timezone.utc)
-                session.add(m)
-                session.commit()
-                return
             m.health_status = health.status
             m.last_response_ms = health.response_ms
             m.last_checked_at = datetime.now(timezone.utc)
+            if health.status == "healthy":
+                m.last_success_at = datetime.now(timezone.utc)
+                m.consecutive_429 = 0
+                m.rate_limited_until = None
             # Update observed rate limits from response headers (always overwrites)
             if health.observed_rate_limit:
                 import json as _json

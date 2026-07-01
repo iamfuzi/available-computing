@@ -51,6 +51,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/api/status")
+def api_status():
+    return {"status": "ok", "service": "available-computing"}
+
+
 # API routes
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(channels.router, prefix="/api/v1/channels", tags=["channels"])

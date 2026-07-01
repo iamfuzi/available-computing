@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { apiKeysApi, modelsApi, channelsApi } from '../api/client'
-import type { ApiKeyRow, ModelRow, Channel } from '../api/client'
+import { apiKeysApi, modelsApi, channelsApi, acApi } from '../api/client'
+import type { ApiKeyRow, ModelRow, Channel, AcStatus } from '../api/client'
 
 type Tab = 'test' | 'curl' | 'python' | 'node'
 type CodeTab = 'curl' | 'python' | 'node'
@@ -25,6 +25,7 @@ export default function ApiDocs() {
   const [tab, setTab] = useState<Tab>('test')
   const [codeTab, setCodeTab] = useState<CodeTab>('curl')
   const [copied, setCopied] = useState<string | null>(null)
+  const [acStatus, setAcStatus] = useState<AcStatus | null>(null)
 
   // Test panel states
   const [selectedChannelId, setSelectedChannelId] = useState<string>('')
@@ -45,6 +46,7 @@ export default function ApiDocs() {
     apiKeysApi.list().then(setKeys).catch(() => {})
     channelsApi.list().then(setChannels).catch(() => {})
     modelsApi.list({ free_only: true }).then(setModels).catch(() => {})
+    acApi.status().then(setAcStatus).catch(() => {})
   }, [])
 
   // Auto-select first options
@@ -212,6 +214,41 @@ data.forEach(m => console.log(m.id));`
     return { curl, python, node }
   }
 
+  function diagnosticsExample() {
+    const curl = `curl ${baseUrl}/ac/status \\
+  -H "Authorization: Bearer ${keyDisplay}"
+
+curl ${baseUrl}/ac/models \\
+  -H "Authorization: Bearer ${keyDisplay}"
+
+curl ${baseUrl}/ac/self-test \\
+  -H "Authorization: Bearer ${keyDisplay}"`
+    const python = `import requests
+
+headers = {"Authorization": "Bearer ${keyDisplay}"}
+status = requests.get("${baseUrl}/ac/status", headers=headers).json()
+models = requests.get("${baseUrl}/ac/models", headers=headers).json()
+self_test = requests.post("${baseUrl}/ac/self-test", headers=headers, json={"model": "auto:text"}).json()
+
+print(status["available_model_count"])
+print(models["data"][0]["route_eligible"])
+print(self_test["ok"])`
+    const node = `const headers = { Authorization: 'Bearer ${keyDisplay}' };
+
+const status = await fetch('${baseUrl}/ac/status', { headers }).then(r => r.json());
+const models = await fetch('${baseUrl}/ac/models', { headers }).then(r => r.json());
+const selfTest = await fetch('${baseUrl}/ac/self-test', {
+  method: 'POST',
+  headers: { ...headers, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ model: 'auto:text' }),
+}).then(r => r.json());
+
+console.log(status.available_model_count);
+console.log(models.data[0].route_eligible);
+console.log(selfTest.ok);`
+    return { curl, python, node }
+  }
+
   function CodeBlock({ code, id }: { code: string; id: string }) {
     return (
       <div className="relative">
@@ -231,6 +268,7 @@ data.forEach(m => console.log(m.id));`
   const chatCode = chatExamples(sampleModel)
   const autoCode = chatExamples('auto:text')
   const listCode = listExample()
+  const diagnosticsCode = diagnosticsExample()
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
@@ -454,6 +492,40 @@ data.forEach(m => console.log(m.id));`
         )}
       </div>
 
+      {acStatus && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4 shadow-sm">
+          <h2 className="text-sm font-semibold text-gray-900">当前接入状态</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="border border-gray-100 rounded-xl px-3 py-2">
+              <div className="text-xs text-gray-400">当前可调用</div>
+              <div className="text-xl font-semibold text-gray-900 mt-1">{acStatus.available_model_count}</div>
+            </div>
+            <div className="border border-gray-100 rounded-xl px-3 py-2">
+              <div className="text-xs text-gray-400">已发现免费</div>
+              <div className="text-xl font-semibold text-gray-900 mt-1">{acStatus.free_model_count}</div>
+            </div>
+            <div className="border border-gray-100 rounded-xl px-3 py-2">
+              <div className="text-xs text-gray-400">限流中</div>
+              <div className="text-xl font-semibold text-gray-900 mt-1">{acStatus.distribution.rate_limited ?? 0}</div>
+            </div>
+            <div className="border border-gray-100 rounded-xl px-3 py-2">
+              <div className="text-xs text-gray-400">推荐路由</div>
+              <div className="text-sm font-mono text-gray-900 mt-2">auto:text</div>
+            </div>
+          </div>
+          <div className="grid md:grid-cols-2 gap-2">
+            {Object.entries(acStatus.routes).map(([route, info]) => (
+              <div key={route} className="flex items-center justify-between border border-gray-100 rounded-lg px-3 py-2">
+                <code className="text-xs font-mono text-gray-900">{route}</code>
+                <span className={`text-xs ${info.available ? 'text-green-700' : 'text-gray-400'}`}>
+                  {info.available ? `${info.candidate_count} 个候选` : '暂无候选'}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Endpoints */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-5 shadow-sm">
         <h2 className="text-sm font-semibold text-gray-900">接口说明</h2>
@@ -497,15 +569,17 @@ data.forEach(m => console.log(m.id));`
       <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4 shadow-sm">
         <h2 className="text-sm font-semibold text-gray-900">智能路由</h2>
         <p className="text-sm text-gray-600">
-          不知道用哪个模型？用 <code className="bg-gray-50 px-1.5 py-0.5 rounded text-xs">auto:text</code> 等前缀，系统自动选择当前最健康最快的模型。
+          不知道用哪个模型？用 <code className="bg-gray-50 px-1.5 py-0.5 rounded text-xs">auto:</code> 前缀让系统自动选择。按类别路由选最快，按能力路由选最聪明。
         </p>
         <div className="flex flex-wrap gap-2">
           {[
+            { prefix: 'auto:smart', desc: '最聪明（参数量最大）', highlight: true },
+            { prefix: 'auto:fast', desc: '最快（延迟最低）', highlight: true },
             { prefix: 'auto:text', desc: '文本对话' },
             { prefix: 'auto:vision', desc: '多模态理解' },
             { prefix: 'auto:code', desc: '代码生成' },
           ].map((r) => (
-            <div key={r.prefix} className="bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+            <div key={r.prefix} className={`border rounded-lg px-3 py-2 ${r.highlight ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-100'}`}>
               <code className="text-xs font-mono text-gray-900">{r.prefix}</code>
               <span className="text-xs text-gray-400 ml-2">{r.desc}</span>
             </div>
@@ -525,6 +599,67 @@ data.forEach(m => console.log(m.id));`
           ))}
         </div>
         <CodeBlock code={autoCode[codeTab]} id={`auto-${codeTab}`} />
+      </div>
+
+      {/* Production Guidance */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4 shadow-sm">
+        <h2 className="text-sm font-semibold text-gray-900">生产接入建议</h2>
+        <div className="grid md:grid-cols-2 gap-3">
+          {[
+            { title: '优先使用 auto:', text: '第三方服务建议默认调用 auto:text、auto:fast 或 auto:smart，避免固定到单个免费模型。' },
+            { title: '尊重 retry_after', text: '收到 all_candidates_rate_limited 时读取 retry_after，等待后再重试，不要立即循环重试。' },
+            { title: '设置超时', text: '客户端建议设置 60-120 秒超时；流式请求要处理连接中断和 [DONE]。' },
+            { title: '记录诊断 header', text: '保存 X-AC-Selected-Model、X-AC-Attempted-Models，排查上游波动会轻松很多。' },
+          ].map((item) => (
+            <div key={item.title} className="border border-gray-100 rounded-xl p-3 bg-gray-50/60">
+              <div className="text-sm font-medium text-gray-900">{item.title}</div>
+              <p className="text-xs text-gray-500 mt-1 leading-relaxed">{item.text}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Diagnostics */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-4 shadow-sm">
+        <h2 className="text-sm font-semibold text-gray-900">诊断接口</h2>
+        <p className="text-sm text-gray-600">
+          OpenAI 兼容的 <code className="bg-gray-50 px-1.5 py-0.5 rounded text-xs">/models</code> 只返回可调用模型。
+          需要完整状态时使用 <code className="bg-gray-50 px-1.5 py-0.5 rounded text-xs">/ac/status</code>、<code className="bg-gray-50 px-1.5 py-0.5 rounded text-xs">/ac/models</code> 和 <code className="bg-gray-50 px-1.5 py-0.5 rounded text-xs">/ac/self-test</code>。
+        </p>
+        <div className="flex gap-1">
+          {CODE_TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setCodeTab(t.id)}
+              className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${
+                codeTab === t.id ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-100'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <CodeBlock code={diagnosticsCode[codeTab]} id={`diagnostics-${codeTab}`} />
+      </div>
+
+      {/* Response Headers */}
+      <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
+        <h2 className="text-sm font-semibold text-gray-900">响应诊断 Header</h2>
+        <div className="grid md:grid-cols-2 gap-2">
+          {[
+            ['X-AC-Route', '请求使用的路由或模型名'],
+            ['X-AC-Selected-Model', '最终命中的上游模型'],
+            ['X-AC-Selected-Provider', '最终命中的上游厂商'],
+            ['X-AC-Attempted-Models', '本次尝试过的候选模型'],
+            ['X-AC-Fallback-Count', '自动 fallback 次数'],
+            ['X-AC-Retry-After', '建议等待秒数'],
+          ].map(([name, desc]) => (
+            <div key={name} className="flex items-start gap-2 border border-gray-100 rounded-lg px-3 py-2">
+              <code className="text-xs font-mono text-blue-700 shrink-0">{name}</code>
+              <span className="text-xs text-gray-500">{desc}</span>
+            </div>
+          ))}
+        </div>
       </div>
 
       {/* Available Models */}
@@ -557,10 +692,15 @@ data.forEach(m => console.log(m.id));`
         <h2 className="text-sm font-semibold text-gray-900">错误码</h2>
         <div className="space-y-2">
           {[
-            { code: '401', desc: '未认证 — API 密钥无效或已过期' },
-            { code: '404', desc: '模型不存在或当前不可用' },
-            { code: '429', desc: '请求频率超限 — 降低调用频率或切换模型' },
-            { code: '502', desc: '上游服务异常 — 系统会自动切换到其他可用节点' },
+            { code: 'model_not_found', desc: '指定模型不存在，或当前不在可调用池中' },
+            { code: 'no_available_models', desc: 'auto 路由没有已验证可用候选' },
+            { code: 'all_candidates_busy', desc: '候选模型当前并发槽已满，稍后重试或降低并发' },
+            { code: 'all_candidates_rate_limited', desc: '候选模型全部处于上游限流，读取 retry_after 后重试' },
+            { code: 'local_rate_limited', desc: '本项目本地限流触发，按 API Key 与路由维度计算' },
+            { code: 'local_model_budget_exceeded', desc: '模型本地 RPM/RPD 预算已满，系统会优先尝试其他候选' },
+            { code: 'model_rate_limited', desc: '指定模型被上游限流，建议改用 auto 路由' },
+            { code: 'upstream_auth_failed', desc: '上游 Key、账号或计费状态异常' },
+            { code: 'upstream_server_error', desc: '上游服务异常，可稍后重试' },
           ].map((e) => (
             <div key={e.code} className="flex items-start gap-3">
               <code className="text-xs font-mono bg-red-50 text-red-600 px-2 py-0.5 rounded shrink-0">{e.code}</code>

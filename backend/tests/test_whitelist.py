@@ -23,6 +23,7 @@ def whitelist_yaml(tmp_path):
                 "free_models": [
                     {"id": "gemini-2.5-flash", "free_type": "permanent", "category": "text"},
                     {"id": "gemini-2.5-pro", "free_type": "permanent", "rate_limit": {"rpd": 50}},
+                    {"id": "gemini-3-pro-preview", "free_type": "permanent", "param_size": 600},
                 ],
             },
         },
@@ -77,6 +78,16 @@ class TestMatch:
     def test_category_preserved(self, wl):
         entry = wl.match("gemini", "gemini-2.5-flash")
         assert entry.category == "text"
+
+    def test_param_size_preserved(self, wl):
+        # Closed-source ids with no parseable marker get param_size from the
+        # whitelist — this is the fallback for the auto:smart router.
+        entry = wl.match("gemini", "gemini-3-pro-preview")
+        assert entry.param_size == 600
+
+    def test_param_size_defaults_none(self, wl):
+        entry = wl.match("gemini", "gemini-2.5-flash")
+        assert entry.param_size is None
 
 
 class TestGetProviderFreeType:

@@ -1,8 +1,15 @@
 import axios from 'axios'
 
 const api = axios.create({ baseURL: '/api/v1' })
+const proxy = axios.create({ baseURL: '/v1' })
 
 api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+proxy.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) config.headers.Authorization = `Bearer ${token}`
   return config
@@ -64,11 +71,18 @@ export const apiKeysApi = {
   delete: (id: string) => api.delete(`/apikeys/${id}`),
 }
 
+export const acApi = {
+  status: () => proxy.get<AcStatus>('/ac/status').then((r) => r.data),
+  models: () => proxy.get<AcModelsResponse>('/ac/models').then((r) => r.data),
+  selfTest: (model = 'auto:text') => proxy.post<AcSelfTest>('/ac/self-test', { model }).then((r) => r.data),
+}
+
 // Types
 export interface PoolSummary {
   total_channels: number
   enabled_channels: number
   free_model_count: number
+  available_model_count: number
   health_distribution: Record<string, number>
 }
 
@@ -113,9 +127,14 @@ export interface ModelRow {
   health_status: string
   last_response_ms: number | null
   last_checked_at: string | null
+  last_success_at: string | null
+  rate_limited_until: string | null
+  last_429_at: string | null
+  consecutive_429: number
   provider_type: string | null
   provider_name: string | null
   base_url: string | null
+  param_size: number | null
 }
 
 export interface ModelListParams {
@@ -124,6 +143,7 @@ export interface ModelListParams {
   free_only?: boolean
   healthy_only?: boolean
   q?: string
+  sort_by?: 'smart' | 'fast'
 }
 
 export interface HealthRecord {
@@ -159,4 +179,48 @@ export interface ApiKeyCreated {
   key: string
   key_prefix: string
   created_at: string
+}
+
+export interface AcRouteStatus {
+  available: boolean
+  candidate_count: number
+  recommended: boolean
+  selected_model: string | null
+}
+
+export interface AcStatus {
+  object: string
+  available_model_count: number
+  free_model_count: number
+  distribution: Record<string, number>
+  routes: Record<string, AcRouteStatus>
+}
+
+export interface AcModelInfo {
+  id: string
+  model_id: string
+  provider_type: string | null
+  provider_name: string | null
+  category: string | null
+  health_status: string
+  route_eligible: boolean
+  rate_limited_until: string | null
+  last_success_at: string | null
+  last_response_ms: number | null
+  free_type: string | null
+}
+
+export interface AcModelsResponse {
+  object: string
+  data: AcModelInfo[]
+}
+
+export interface AcSelfTest {
+  ok: boolean
+  route: string
+  code?: string
+  message?: string
+  selected_model: string | null
+  candidate_count: number
+  checked?: Array<{ model: string; ok: boolean; reason: string | null; retry_after?: number }>
 }

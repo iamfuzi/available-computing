@@ -16,7 +16,8 @@ export default function Pool() {
   const [models, setModels] = useState<ModelRow[]>([])
   const [q, setQ] = useState('')
   const [category, setCategory] = useState('全部')
-  const [healthyOnly, setHealthyOnly] = useState(false)
+  const [healthyOnly, setHealthyOnly] = useState(true)
+  const [sortBy, setSortBy] = useState<'fast' | 'smart'>('fast')
   const [showAddModal, setShowAddModal] = useState(false)
   const [menuOpen, setMenuOpen] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -36,8 +37,9 @@ export default function Pool() {
           free_only: true,
           q: q || undefined,
           category: category !== '全部' ? CAT_MAP[category] : undefined,
-          healthy_only: healthyOnly || undefined,
+          healthy_only: healthyOnly,
           provider: provider || undefined,
+          sort_by: sortBy,
         }, signal),
       ])
       setSummary(s)
@@ -47,7 +49,7 @@ export default function Pool() {
     } finally {
       setLoading(false)
     }
-  }, [q, category, healthyOnly, provider])
+  }, [q, category, healthyOnly, provider, sortBy])
 
   useEffect(() => {
     channelsApi.list().then(setChannels).catch(() => {})
@@ -94,7 +96,7 @@ export default function Pool() {
         <div>
           <h1 className="text-lg font-bold text-gray-900">算力池总览</h1>
           <p className="text-xs text-gray-400 mt-0.5">
-            {summary ? `${summary.enabled_channels} 个厂商 · ${summary.free_model_count} 个免费模型` : '加载中...'}
+            {summary ? `${summary.enabled_channels} 个厂商 · ${summary.available_model_count} 个当前可调用` : '加载中...'}
           </p>
         </div>
         <div className="flex gap-2">
@@ -116,15 +118,15 @@ export default function Pool() {
             value={`${summary.enabled_channels}/${summary.total_channels}`}
             onClick={() => navigate('/channels')}
           />
-          <StatCard label="免费模型" value={summary.free_model_count} />
+          <StatCard label="当前可调用" value={summary.available_model_count} />
           <StatCard
-            label="健康可用"
-            value={summary.health_distribution.healthy ?? 0}
+            label="已发现免费"
+            value={summary.free_model_count}
             sub={
-              [summary.health_distribution.slow, summary.health_distribution.down]
+              [summary.health_distribution.rate_limited, summary.health_distribution.slow, summary.health_distribution.down]
                 .filter(Boolean)
                 .length
-                ? `慢 ${summary.health_distribution.slow ?? 0} · 异常 ${summary.health_distribution.down ?? 0}`
+                ? `限流 ${summary.health_distribution.rate_limited ?? 0} · 慢 ${summary.health_distribution.slow ?? 0} · 异常 ${summary.health_distribution.down ?? 0}`
                 : undefined
             }
           />
@@ -208,6 +210,26 @@ export default function Pool() {
               />
               仅健康
             </label>
+            <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
+              <button
+                onClick={() => setSortBy('fast')}
+                className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+                  sortBy === 'fast' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                }`}
+                title="按响应速度排序（对应 auto:fast）"
+              >
+                最快
+              </button>
+              <button
+                onClick={() => setSortBy('smart')}
+                className={`text-xs px-2.5 py-1 rounded-md transition-colors ${
+                  sortBy === 'smart' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                }`}
+                title="按参数量排序（对应 auto:smart）"
+              >
+                最聪明
+              </button>
+            </div>
             <div className="ml-auto relative">
               <input
                 value={q}
@@ -232,6 +254,7 @@ export default function Pool() {
                     <th className="px-4 py-3 text-left font-medium">厂商</th>
                     <th className="px-4 py-3 text-left font-medium">模型</th>
                     <th className="px-4 py-3 text-left font-medium hidden sm:table-cell">上下文</th>
+                    <th className="px-4 py-3 text-left font-medium hidden md:table-cell">参数量</th>
                     <th className="px-4 py-3 text-left font-medium hidden md:table-cell">免费类型</th>
                     <th className="px-4 py-3 text-left font-medium">状态</th>
                     <th className="px-4 py-3 w-10"></th>
@@ -255,6 +278,13 @@ export default function Pool() {
                       </td>
                       <td className="px-4 py-3 text-gray-500 hidden sm:table-cell">
                         {m.context_length ? `${Math.round(m.context_length / 1000)}K` : '—'}
+                      </td>
+                      <td className="px-4 py-3 text-gray-500 hidden md:table-cell">
+                        {m.param_size != null
+                          ? (m.param_size >= 1
+                              ? `${m.param_size % 1 === 0 ? m.param_size.toFixed(0) : m.param_size}B`
+                              : `${m.param_size}B`)
+                          : '—'}
                       </td>
                       <td className="px-4 py-3 hidden md:table-cell">
                         <FreeTypeBadge freeType={m.free_type} source={m.free_source} />
@@ -300,7 +330,7 @@ export default function Pool() {
           )}
 
           <div className="px-4 py-2.5 text-xs text-gray-400 border-t border-gray-100">
-            共 {models.length} 个模型 · 按响应时间排序
+            共 {models.length} 个模型 · {sortBy === 'smart' ? '按参数量排序' : '按响应速度排序'}
           </div>
         </div>
       )}

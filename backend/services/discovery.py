@@ -7,6 +7,7 @@ from database import engine
 from models import Channel, Model
 from adapters import get_adapter, ModelInfo
 from services.whitelist import whitelist
+from services.param_size import parse_param_size
 from services import events
 
 
@@ -98,6 +99,13 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
             wl_entry = whitelist.match(channel.provider_type, raw.model_id)
             category = (wl_entry.category if wl_entry and wl_entry.category else None) or raw.category
 
+            # Parameter count for auto:smart routing: parse from the id, with
+            # the whitelist's param_size as a fallback for closed-source ids
+            # (glm / gemini / gpt / claude) that carry no numeric marker.
+            param_size = parse_param_size(raw.model_id)
+            if param_size is None and wl_entry and wl_entry.param_size:
+                param_size = wl_entry.param_size
+
             rate_limit_json = json.dumps(raw.rate_limit) if raw.rate_limit else None
             rate_limit_source = None
             # Merge whitelist rate_limit if API didn't provide one
@@ -118,6 +126,7 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
                     if rate_limit_source:
                         m.rate_limit_source = rate_limit_source
                 m.display_name = raw.display_name
+                m.param_size = param_size
                 m.is_active = True
                 session.add(m)
             else:
@@ -132,6 +141,7 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
                     is_free=free_info["is_free"],
                     free_type=free_info["free_type"],
                     free_source=free_info["free_source"],
+                    param_size=param_size,
                     is_active=True,
                 )
                 session.add(m)

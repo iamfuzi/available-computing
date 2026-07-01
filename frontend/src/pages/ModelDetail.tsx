@@ -207,6 +207,7 @@ export default function ModelDetail() {
             <p className="text-sm text-gray-400 mt-0.5">
               {model.provider_name} · {model.category}
               {model.context_length ? ` · 上下文 ${Math.round(model.context_length / 1000)}K` : ''}
+              {model.param_size != null ? ` · 参数量 ${model.param_size}B` : ''}
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
