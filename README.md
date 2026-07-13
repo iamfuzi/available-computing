@@ -132,6 +132,7 @@ curl http://localhost:8080/v1/chat/completions \
 | 硅基流动（SiliconFlow） | 20+ | 文本 + 嵌入 + 重排 + 图像 + 视频生成 |
 | Google Gemini | 9 | 免费配额，Flash 系列可用 |
 | OpenRouter | 29+ | 聚合平台，自动检测免费模型 |
+| Agnes AI | 1 | agnes-2.0-flash 文本+图像理解免费，512K 上下文 |
 | 智谱AI（ZhiPu） | 9 | Flash 系列永久免费，含图像/视频生成 |
 
 新增厂商只需实现一个 Adapter 文件，见 [`backend/adapters/`](./backend/adapters/)。
@@ -166,7 +167,7 @@ npm run dev    # Vite dev server，自动代理 /api → :8000
 
 ```
 backend/
-  adapters/     # 厂商适配器（Groq / SiliconFlow / Gemini / OpenRouter / ZhiPu）
+  adapters/     # 厂商适配器（Groq / SiliconFlow / Gemini / OpenRouter / ZhiPu / Agnes）
   api/          # REST API + OpenAI 兼容代理 + API 密钥管理
   models/       # 数据库模型（Channel / Model / ApiKey / HealthRecord）
   services/     # 核心业务（发现、探测、加密、调度、清理）
@@ -278,6 +279,7 @@ client.chat.completions.create(
 | SiliconFlow | 20+ | Text + embedding + rerank + image + video generation |
 | Google Gemini | 9 | Free quota, Flash series available |
 | OpenRouter | 29+ | Aggregator, auto-detects free models |
+| Agnes AI | 1 | agnes-2.0-flash text+image understanding free, 512K context |
 | ZhiPu (智谱AI) | 9 | Flash series permanently free, incl. image/video generation |
 
 Adding a new provider = implement one Adapter file. See [`backend/adapters/`](./backend/adapters/).

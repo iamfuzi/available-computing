@@ -45,7 +45,10 @@ export default function ApiDocs() {
   useEffect(() => {
     apiKeysApi.list().then(setKeys).catch(() => {})
     channelsApi.list().then(setChannels).catch(() => {})
-    modelsApi.list({ free_only: true }).then(setModels).catch(() => {})
+    // Include slow models (e.g. providers with high first-token latency like
+    // Agnes) so they remain testable here; down/rate-limited are still hidden
+    // via the default hide_down=true.
+    modelsApi.list({ free_only: true, healthy_only: false }).then(setModels).catch(() => {})
     acApi.status().then(setAcStatus).catch(() => {})
   }, [])
 

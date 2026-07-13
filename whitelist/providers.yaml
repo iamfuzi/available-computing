@@ -130,6 +130,23 @@ providers:
           rpm: 15
           rpd: 1500
 
+  agnes:
+    free_strategy: whitelist
+    free_models:
+      - id: "agnes-2.0-flash"
+        free_type: permanent
+        rate_limit:
+          rpm: 30
+        notes: "文本+图像理解，512K上下文，当前 $0/1M tokens 免费。同一 key 所有模型共享 RPM 配额池"
+      # Only agnes-2.0-flash is whitelisted:
+      # - agnes-1.5-flash: free status not confirmed in docs.
+      # - agnes-image-* / agnes-video-*: generation models that reject chat
+      #   requests; probing them would fail and burn the shared RPM budget.
+      # param_size intentionally omitted: Agnes does not publish it, and the
+      # id carries no <n>b marker, so auto:smart (size-sorted) deprioritizes
+      # it. auto:fast / auto:text (latency-sorted) are unaffected. Category
+      # stays text by convention (single category per model, like Gemini Flash).
+
   zhipu:
     free_strategy: whitelist
     free_models:

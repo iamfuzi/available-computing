@@ -152,6 +152,7 @@ export default function Pool() {
               { id: 'groq', name: 'Groq', desc: '全免费' },
               { id: 'siliconflow', name: 'SiliconFlow', desc: '部分免费' },
               { id: 'gemini', name: 'Gemini', desc: '免费额度' },
+              { id: 'agnes', name: 'Agnes AI', desc: 'flash 免费' },
             ] as const).map((p) => (
               <button
                 key={p.id}

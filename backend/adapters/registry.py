@@ -4,6 +4,7 @@ from .siliconflow import SiliconFlowAdapter
 from .gemini import GeminiAdapter
 from .openrouter import OpenRouterAdapter
 from .zhipu import ZhiPuAdapter
+from .agnes import AgnesAdapter
 
 _registry: dict[str, ProviderAdapter] = {}
 
@@ -17,6 +18,7 @@ _register(SiliconFlowAdapter())
 _register(GeminiAdapter())
 _register(OpenRouterAdapter())
 _register(ZhiPuAdapter())
+_register(AgnesAdapter())
 
 
 def get_adapter(provider_id: str) -> ProviderAdapter:

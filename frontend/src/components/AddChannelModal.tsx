@@ -34,6 +34,11 @@ const PROVIDER_INFO: Record<string, { hint: string; url: string; desc: string }>
     hint: '智谱开放平台 → API 密钥 → 添加新 API Key',
     url: 'https://open.bigmodel.cn/user-center/apikeys',
   },
+  agnes: {
+    desc: 'agnes-2.0-flash 文本+图像理解免费',
+    hint: 'Agnes AI → 创建 API Key',
+    url: 'https://agnes-ai.com',
+  },
 }
 
 export default function AddChannelModal({ open, onClose, onCreated }: Props) {

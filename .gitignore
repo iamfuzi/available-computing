@@ -12,3 +12,4 @@ frontend/dist/
 backend/static/
 .DS_Store
 .gstack/
+.zcode/
