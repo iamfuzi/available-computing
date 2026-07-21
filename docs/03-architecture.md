@@ -53,7 +53,6 @@
 │  │  │  Adapter Registry                               │   │   │
 │  │  │  ├─ GroqAdapter                                 │   │   │
 │  │  │  ├─ SiliconFlowAdapter                          │   │   │
-│  │  │  ├─ GeminiAdapter                               │   │   │
 │  │  │  ├─ OpenRouterAdapter                           │   │   │
 │  │  │  └─ ...（新厂商 = 新 Adapter）                   │   │   │
 │  │  └───────────────────────┬────────────────────────┘   │   │
@@ -67,7 +66,7 @@
 └─────────────────────────────────────────────────────────────┘
               │
               ▼  出站 HTTPS
-    各厂商 API（Groq / SiliconFlow / Gemini / OpenRouter / ...）
+    各厂商 API（Groq / SiliconFlow / OpenRouter / ...）
 ```
 
 ---
@@ -107,7 +106,6 @@ available-computing/
 │   │   ├── base.py              # ProviderAdapter 抽象基类
 │   │   ├── groq.py
 │   │   ├── siliconflow.py
-│   │   ├── gemini.py
 │   │   ├── openrouter.py        # 自动从 pricing 字段检测免费
 │   │   └── registry.py          # 适配器注册表
 │   └── requirements.txt
@@ -151,7 +149,7 @@ available-computing/
 -- 厂商接入实例
 CREATE TABLE channel (
     id              TEXT PRIMARY KEY,       -- UUID
-    provider_type   TEXT NOT NULL,          -- groq / siliconflow / gemini / openrouter
+    provider_type   TEXT NOT NULL,          -- groq / siliconflow / openrouter
     name            TEXT NOT NULL,          -- 显示名称
     api_key_enc     TEXT NOT NULL,          -- AES-256-GCM 加密后的 Key
     base_url        TEXT,                   -- 可选，覆盖默认
@@ -317,12 +315,7 @@ JWT 认证（与 Dashboard 共用 token）
   ↓
 从 DB 查找 model_id → channel → 解密 API key
   ↓
-├─ OpenAI 兼容厂商（Groq / SiliconFlow / OpenRouter）
-│   → 直接转发到 {base_url}/chat/completions
-│
-└─ Gemini
-    → 转换为 Gemini :generateContent 格式
-    → 响应转换回 OpenAI 格式
+转发到 {base_url}/chat/completions
   ↓
 ├─ stream=true  → httpx AsyncClient + StreamingResponse（SSE）
 └─ stream=false → 等待完整响应
@@ -344,7 +337,7 @@ client = OpenAI(
 
 # 自动路由到正确的厂商
 client.chat.completions.create(
-    model="gemini-2.5-flash",
+    model="glm-4-flash",
     messages=[{"role": "user", "content": "Hello"}]
 )
 ```

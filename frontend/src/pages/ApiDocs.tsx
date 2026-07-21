@@ -18,6 +18,38 @@ const TEST_TABS = [
   { id: 'node' as Tab, label: 'Node.js' },
 ]
 
+const TESTABLE_CATEGORIES = new Set(['text', 'vision', 'code', 'image'])
+
+function isTestableModel(model: ModelRow) {
+  return TESTABLE_CATEGORIES.has(model.category || 'text')
+}
+
+function CodeBlock({
+  code,
+  id,
+  copied,
+  onCopy,
+}: {
+  code: string
+  id: string
+  copied: string | null
+  onCopy: (text: string, id: string) => void
+}) {
+  return (
+    <div className="relative">
+      <pre className="bg-gray-900 text-gray-100 rounded-xl p-4 pr-16 text-xs font-mono overflow-x-auto leading-relaxed">
+        <code>{code}</code>
+      </pre>
+      <button
+        onClick={() => onCopy(code, id)}
+        className="absolute top-2 right-2 text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-600 transition-colors"
+      >
+        {copied === id ? '✓' : '复制'}
+      </button>
+    </div>
+  )
+}
+
 export default function ApiDocs() {
   const [keys, setKeys] = useState<ApiKeyRow[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
@@ -33,6 +65,7 @@ export default function ApiDocs() {
   const [selectedKeyId, setSelectedKeyId] = useState<string>('')
   const [testMessage, setTestMessage] = useState('你好，介绍一下你自己')
   const [testResponse, setTestResponse] = useState<string>('')
+  const [testImageUrl, setTestImageUrl] = useState<string>('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamFinished, setStreamFinished] = useState(true)
   const [testError, setTestError] = useState<string>('')
@@ -57,26 +90,26 @@ export default function ApiDocs() {
     if (channels.length > 0 && !selectedChannelId) {
       setSelectedChannelId(channels[0].id)
     }
-  }, [channels])
+  }, [channels, selectedChannelId])
 
   useEffect(() => {
     if (keys.length > 0 && !selectedKeyId) {
       setSelectedKeyId(keys.find(k => k.is_active)?.id || keys[0].id)
     }
-  }, [keys])
+  }, [keys, selectedKeyId])
 
   useEffect(() => {
     if (selectedChannelId) {
-      const channelModels = models.filter(m => m.channel_id === selectedChannelId)
+      const channelModels = models.filter(m => m.channel_id === selectedChannelId && isTestableModel(m))
       if (channelModels.length > 0 && (!selectedModel || !channelModels.find(m => m.model_id === selectedModel))) {
         setSelectedModel(channelModels[0].model_id)
       }
     }
-  }, [selectedChannelId, models])
+  }, [selectedChannelId, models, selectedModel])
 
   const filteredModels = selectedChannelId
-    ? models.filter(m => m.channel_id === selectedChannelId)
-    : models
+    ? models.filter(m => m.channel_id === selectedChannelId && isTestableModel(m))
+    : models.filter(isTestableModel)
 
   async function runTest() {
     if (!selectedModel || !testMessage || isStreaming) return
@@ -84,12 +117,41 @@ export default function ApiDocs() {
     setIsStreaming(true)
     setStreamFinished(false)
     setTestResponse('')
+    setTestImageUrl('')
     setTestError('')
 
     try {
       const apiKey = keys.find(k => k.id === selectedKeyId)
       if (!apiKey) {
         throw new Error('请选择API密钥')
+      }
+
+      const selectedModelInfo = models.find(m => m.model_id === selectedModel && m.channel_id === selectedChannelId)
+      if (selectedModelInfo?.category === 'image') {
+        const response = await fetch('/v1/images/generations', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey.key}`
+          },
+          body: JSON.stringify({
+            model: selectedModel,
+            prompt: testMessage,
+            size: '1024x1024',
+            quality: 'standard'
+          })
+        })
+        const payload = await response.json()
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${JSON.stringify(payload)}`)
+        }
+        const imageUrl = payload.data?.[0]?.url
+        if (!imageUrl) {
+          throw new Error('上游响应中没有图片 URL')
+        }
+        setTestImageUrl(imageUrl)
+        setTestResponse('图片生成成功')
+        return
       }
 
       const response = await fetch('/v1/chat/completions', {
@@ -135,7 +197,7 @@ export default function ApiDocs() {
               if (content) {
                 setTestResponse(prev => prev + content)
               }
-            } catch (e) {
+            } catch {
               // Ignore parse errors for incomplete chunks
             }
           }
@@ -217,6 +279,36 @@ data.forEach(m => console.log(m.id));`
     return { curl, python, node }
   }
 
+  function imageExamples() {
+    const curl = `curl ${baseUrl}/images/generations \\
+  -H "Authorization: Bearer ${keyDisplay}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "auto:image",
+    "prompt": "一只戴宇航员头盔的橘猫，电影感灯光",
+    "size": "1024x1024"
+  }'`
+    const python = `from openai import OpenAI
+
+client = OpenAI(base_url="${baseUrl}", api_key="${keyDisplay}")
+result = client.images.generate(
+    model="auto:image",
+    prompt="一只戴宇航员头盔的橘猫，电影感灯光",
+    size="1024x1024",
+)
+print(result.data[0].url)`
+    const node = `import OpenAI from 'openai';
+
+const client = new OpenAI({ baseURL: '${baseUrl}', apiKey: '${keyDisplay}' });
+const result = await client.images.generate({
+  model: 'auto:image',
+  prompt: '一只戴宇航员头盔的橘猫，电影感灯光',
+  size: '1024x1024',
+});
+console.log(result.data[0].url);`
+    return { curl, python, node }
+  }
+
   function diagnosticsExample() {
     const curl = `curl ${baseUrl}/ac/status \\
   -H "Authorization: Bearer ${keyDisplay}"
@@ -252,25 +344,23 @@ console.log(selfTest.ok);`
     return { curl, python, node }
   }
 
-  function CodeBlock({ code, id }: { code: string; id: string }) {
-    return (
-      <div className="relative">
-        <pre className="bg-gray-900 text-gray-100 rounded-xl p-4 pr-16 text-xs font-mono overflow-x-auto leading-relaxed">
-          <code>{code}</code>
-        </pre>
-        <button
-          onClick={() => copy(code, id)}
-          className="absolute top-2 right-2 text-xs bg-gray-700 text-gray-300 px-2 py-1 rounded-lg hover:bg-gray-600 transition-colors"
-        >
-          {copied === id ? '✓' : '复制'}
-        </button>
-      </div>
-    )
-  }
-
   const chatCode = chatExamples(sampleModel)
   const autoCode = chatExamples('auto:text')
+  const routingPolicyCode = `curl ${baseUrl}/chat/completions \\
+  -H "Authorization: Bearer ${keyDisplay}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "auto:text",
+    "messages": [{"role": "user", "content": "你好"}],
+    "routing_policy": {
+      "exclude": ["agnes"],
+      "min_context": 32000,
+      "prefer": "capability",
+      "fallback_chain": ["mistral-small-latest", "auto:fast"]
+    }
+  }'`
   const listCode = listExample()
+  const imageCode = imageExamples()
   const diagnosticsCode = diagnosticsExample()
 
   return (
@@ -361,7 +451,7 @@ console.log(selfTest.ok);`
 
             {/* Test Message Input */}
             <div>
-              <label className="text-xs text-gray-500 block mb-1.5">测试消息</label>
+              <label className="text-xs text-gray-500 block mb-1.5">测试消息 / 图片提示词</label>
               <textarea
                 value={testMessage}
                 onChange={(e) => setTestMessage(e.target.value)}
@@ -385,9 +475,9 @@ console.log(selfTest.ok);`
               >
                 {isStreaming ? '🔄 测试中...' : '▶️ 发送测试'}
               </button>
-              {testResponse && (
+              {(testResponse || testImageUrl) && (
                 <button
-                  onClick={() => { setTestResponse(''); setTestError(''); setStreamFinished(true); }}
+                  onClick={() => { setTestResponse(''); setTestImageUrl(''); setTestError(''); setStreamFinished(true); }}
                   className="text-sm px-4 py-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition-colors"
                 >
                   🗑️ 清空结果
@@ -396,16 +486,16 @@ console.log(selfTest.ok);`
             </div>
 
             {/* Response Area */}
-            {(testResponse || testError || isStreaming) && (
+            {(testResponse || testImageUrl || testError || isStreaming) && (
               <div className="border border-gray-200 rounded-xl overflow-hidden">
                 <div className="bg-gray-50 px-3 py-2 border-b border-gray-200 flex items-center justify-between">
                   <span className="text-xs font-medium text-gray-700">
                     响应结果
-                    {streamFinished && testResponse && <span className="ml-2 text-green-600">✓ 完成</span>}
+                    {streamFinished && (testResponse || testImageUrl) && <span className="ml-2 text-green-600">✓ 完成</span>}
                   </span>
-                  {testResponse && (
+                  {(testResponse || testImageUrl) && (
                     <button
-                      onClick={() => navigator.clipboard.writeText(testResponse)}
+                      onClick={() => navigator.clipboard.writeText(testImageUrl || testResponse)}
                       className="text-xs text-blue-600 hover:text-blue-700"
                     >
                       复制
@@ -415,6 +505,17 @@ console.log(selfTest.ok);`
                 <div className="p-4 min-h-[120px] max-h-[300px] overflow-y-auto">
                   {testError ? (
                     <div className="text-red-600 text-sm whitespace-pre-wrap">{testError}</div>
+                  ) : testImageUrl ? (
+                    <div className="space-y-3">
+                      <img
+                        src={testImageUrl}
+                        alt={testMessage}
+                        className="max-h-[480px] mx-auto rounded-xl border border-gray-100 object-contain"
+                      />
+                      <a href={testImageUrl} target="_blank" rel="noreferrer" className="block text-xs text-blue-600 break-all hover:underline">
+                        在新窗口打开原图
+                      </a>
+                    </div>
                   ) : testResponse ? (
                     <div className="text-sm text-gray-800 whitespace-pre-wrap">{testResponse}</div>
                   ) : isStreaming ? (
@@ -509,7 +610,7 @@ console.log(selfTest.ok);`
             </div>
             <div className="border border-gray-100 rounded-xl px-3 py-2">
               <div className="text-xs text-gray-400">限流中</div>
-              <div className="text-xl font-semibold text-gray-900 mt-1">{acStatus.distribution.rate_limited ?? 0}</div>
+              <div className="text-xl font-semibold text-gray-900 mt-1">{acStatus.distribution?.rate_limited ?? 0}</div>
             </div>
             <div className="border border-gray-100 rounded-xl px-3 py-2">
               <div className="text-xs text-gray-400">推荐路由</div>
@@ -517,7 +618,7 @@ console.log(selfTest.ok);`
             </div>
           </div>
           <div className="grid md:grid-cols-2 gap-2">
-            {Object.entries(acStatus.routes).map(([route, info]) => (
+            {Object.entries(acStatus.routes ?? {}).map(([route, info]) => (
               <div key={route} className="flex items-center justify-between border border-gray-100 rounded-lg px-3 py-2">
                 <code className="text-xs font-mono text-gray-900">{route}</code>
                 <span className={`text-xs ${info.available ? 'text-green-700' : 'text-gray-400'}`}>
@@ -554,7 +655,19 @@ console.log(selfTest.ok);`
               </button>
             ))}
           </div>
-          <CodeBlock code={chatCode[codeTab]} id={`chat-${codeTab}`} />
+          <CodeBlock code={chatCode[codeTab]} id={`chat-${codeTab}`} copied={copied} onCopy={copy} />
+        </div>
+
+        {/* Models */}
+        <div className="space-y-3 pt-4 border-t border-gray-100">
+          <div>
+            <code className="text-xs font-mono bg-purple-50 text-purple-700 px-2 py-0.5 rounded">POST</code>
+            <code className="text-sm font-mono ml-2">/images/generations</code>
+          </div>
+          <p className="text-sm text-gray-600">
+            生成单张图片，兼容 OpenAI Images API 的 URL 响应；可指定图片模型，或用 <code className="text-xs">auto:image</code> 自动选择。
+          </p>
+          <CodeBlock code={imageCode[codeTab]} id={`images-${codeTab}`} copied={copied} onCopy={copy} />
         </div>
 
         {/* Models */}
@@ -564,7 +677,7 @@ console.log(selfTest.ok);`
             <code className="text-sm font-mono ml-2">/models</code>
           </div>
           <p className="text-sm text-gray-600">列出所有可用的免费模型。</p>
-          <CodeBlock code={listCode[codeTab]} id={`list-${codeTab}`} />
+          <CodeBlock code={listCode[codeTab]} id={`list-${codeTab}`} copied={copied} onCopy={copy} />
         </div>
       </div>
 
@@ -581,6 +694,7 @@ console.log(selfTest.ok);`
             { prefix: 'auto:text', desc: '文本对话' },
             { prefix: 'auto:vision', desc: '多模态理解' },
             { prefix: 'auto:code', desc: '代码生成' },
+            { prefix: 'auto:image', desc: '图片生成' },
           ].map((r) => (
             <div key={r.prefix} className={`border rounded-lg px-3 py-2 ${r.highlight ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-100'}`}>
               <code className="text-xs font-mono text-gray-900">{r.prefix}</code>
@@ -601,7 +715,12 @@ console.log(selfTest.ok);`
             </button>
           ))}
         </div>
-        <CodeBlock code={autoCode[codeTab]} id={`auto-${codeTab}`} />
+        <CodeBlock code={autoCode[codeTab]} id={`auto-${codeTab}`} copied={copied} onCopy={copy} />
+        <div className="pt-3 border-t border-gray-100 space-y-2">
+          <p className="text-sm font-medium text-gray-800">请求级策略（可选扩展）</p>
+          <p className="text-xs text-gray-500">请求可以临时排除厂商、提高上下文下限或指定 fallback；它不能放宽 API Key 已设置的权限。</p>
+          <CodeBlock code={routingPolicyCode} id="routing-policy" copied={copied} onCopy={copy} />
+        </div>
       </div>
 
       {/* Production Guidance */}
@@ -642,7 +761,7 @@ console.log(selfTest.ok);`
             </button>
           ))}
         </div>
-        <CodeBlock code={diagnosticsCode[codeTab]} id={`diagnostics-${codeTab}`} />
+        <CodeBlock code={diagnosticsCode[codeTab]} id={`diagnostics-${codeTab}`} copied={copied} onCopy={copy} />
       </div>
 
       {/* Response Headers */}
@@ -653,6 +772,9 @@ console.log(selfTest.ok);`
             ['X-AC-Route', '请求使用的路由或模型名'],
             ['X-AC-Selected-Model', '最终命中的上游模型'],
             ['X-AC-Selected-Provider', '最终命中的上游厂商'],
+            ['X-AC-Actual-Model', '厂商/模型的完整实际路由'],
+            ['X-AC-Fallback-Triggered', '是否发生自动降级'],
+            ['X-AC-Model-Verified-At', '模型最近一次成功验证时间'],
             ['X-AC-Attempted-Models', '本次尝试过的候选模型'],
             ['X-AC-Fallback-Count', '自动 fallback 次数'],
             ['X-AC-Retry-After', '建议等待秒数'],

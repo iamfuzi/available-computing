@@ -24,7 +24,7 @@
 
 ## 1. 核心概念
 
-本项目聚合了多个 AI 厂商（OpenRouter、SiliconFlow、Groq、Gemini、ZhiPu）的**免费模型**，对外暴露统一接口。你不需要关心：
+本项目聚合了多个 AI 厂商（OpenRouter、SiliconFlow、Groq、ZhiPu）的**免费模型**，对外暴露统一接口。你不需要关心：
 
 - 哪些模型现在免费、哪些可用
 - 各厂商的鉴权方式、请求格式差异

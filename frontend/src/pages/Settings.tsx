@@ -15,6 +15,13 @@ export default function SettingsPage() {
   const [copiedNew, setCopiedNew] = useState(false)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
   const [keyLoading, setKeyLoading] = useState(false)
+  const [showKeyPolicy, setShowKeyPolicy] = useState(false)
+  const [newWhitelist, setNewWhitelist] = useState('')
+  const [newBlacklist, setNewBlacklist] = useState('')
+  const [newRpm, setNewRpm] = useState('')
+  const [newRpd, setNewRpd] = useState('')
+  const [newMinContext, setNewMinContext] = useState('')
+  const [newPrefer, setNewPrefer] = useState<'latency' | 'capability'>('latency')
 
   useEffect(() => {
     Promise.all([settingsApi.get(), apiKeysApi.list()])
@@ -48,9 +55,31 @@ export default function SettingsPage() {
     if (!newKeyName.trim()) return
     setKeyLoading(true)
     try {
-      const created = await apiKeysApi.create(newKeyName.trim())
+      const splitProviders = (value: string) => value
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean)
+      const created = await apiKeysApi.create({
+        name: newKeyName.trim(),
+        provider_whitelist: splitProviders(newWhitelist),
+        provider_blacklist: splitProviders(newBlacklist),
+        rate_limit: {
+          ...(newRpm ? { rpm: Number(newRpm) } : {}),
+          ...(newRpd ? { rpd: Number(newRpd) } : {}),
+        },
+        default_routing_policy: {
+          prefer: newPrefer,
+          ...(newMinContext ? { min_context: Number(newMinContext) } : {}),
+        },
+      })
       setCreatedKey(created)
       setNewKeyName('')
+      setNewWhitelist('')
+      setNewBlacklist('')
+      setNewRpm('')
+      setNewRpd('')
+      setNewMinContext('')
+      setNewPrefer('latency')
       loadKeys()
     } catch {
       setError('创建密钥失败')
@@ -63,14 +92,18 @@ export default function SettingsPage() {
     try {
       await apiKeysApi.delete(id)
       loadKeys()
-    } catch {}
+    } catch {
+      setError('删除密钥失败')
+    }
   }
 
   async function handleToggleKey(key: ApiKeyRow) {
     try {
       await apiKeysApi.update(key.id, { is_active: !key.is_active })
       loadKeys()
-    } catch {}
+    } catch {
+      setError('更新密钥状态失败')
+    }
   }
 
   function copyText(text: string, setter?: (v: boolean) => void) {
@@ -158,6 +191,15 @@ export default function SettingsPage() {
                     )}
                     <span className="text-xs text-gray-300">创建于 {fmtDate(k.created_at)}</span>
                   </div>
+                  {(k.provider_whitelist.length > 0 || k.provider_blacklist.length > 0 || k.rate_limit.rpm || k.rate_limit.rpd || k.default_routing_policy.min_context) && (
+                    <div className="flex flex-wrap gap-1 mt-1.5 text-[10px] text-gray-500">
+                      {k.provider_whitelist.length > 0 && <span className="bg-blue-50 px-1.5 py-0.5 rounded">仅 {k.provider_whitelist.join(', ')}</span>}
+                      {k.provider_blacklist.length > 0 && <span className="bg-red-50 px-1.5 py-0.5 rounded">排除 {k.provider_blacklist.join(', ')}</span>}
+                      {k.rate_limit.rpm && <span className="bg-gray-50 px-1.5 py-0.5 rounded">{k.rate_limit.rpm} RPM</span>}
+                      {k.rate_limit.rpd && <span className="bg-gray-50 px-1.5 py-0.5 rounded">{k.rate_limit.rpd} RPD</span>}
+                      {k.default_routing_policy.min_context && <span className="bg-gray-50 px-1.5 py-0.5 rounded">≥ {Math.round(k.default_routing_policy.min_context / 1000)}K 上下文</span>}
+                    </div>
+                  )}
                 </div>
                 <button
                   onClick={() => handleDeleteKey(k.id)}
@@ -173,21 +215,44 @@ export default function SettingsPage() {
         )}
 
         {/* Create form */}
-        <div className="flex gap-2 pt-2 border-t border-gray-50">
-          <input
-            value={newKeyName}
-            onChange={(e) => setNewKeyName(e.target.value)}
-            placeholder="输入名称，如「我的应用」"
-            className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-50 transition-shadow"
-            onKeyDown={(e) => e.key === 'Enter' && handleCreateKey()}
-          />
-          <button
-            onClick={handleCreateKey}
-            disabled={!newKeyName.trim() || keyLoading}
-            className="bg-gray-900 text-white text-sm rounded-lg px-4 py-2 hover:bg-gray-800 transition-colors disabled:opacity-50 shrink-0"
-          >
-            创建密钥
-          </button>
+        <div className="space-y-3 pt-2 border-t border-gray-50">
+          <div className="flex gap-2">
+            <input
+              value={newKeyName}
+              onChange={(e) => setNewKeyName(e.target.value)}
+              placeholder="输入名称，如「我的应用」"
+              className="flex-1 border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-50 transition-shadow"
+              onKeyDown={(e) => e.key === 'Enter' && !showKeyPolicy && handleCreateKey()}
+            />
+            <button
+              type="button"
+              onClick={() => setShowKeyPolicy(!showKeyPolicy)}
+              className="border border-gray-200 text-gray-500 text-xs rounded-lg px-3 py-2 hover:bg-gray-50"
+            >
+              {showKeyPolicy ? '收起策略' : '路由策略'}
+            </button>
+            <button
+              onClick={handleCreateKey}
+              disabled={!newKeyName.trim() || keyLoading}
+              className="bg-gray-900 text-white text-sm rounded-lg px-4 py-2 hover:bg-gray-800 transition-colors disabled:opacity-50 shrink-0"
+            >
+              创建密钥
+            </button>
+          </div>
+          {showKeyPolicy && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-gray-50 rounded-xl p-3">
+              <input value={newWhitelist} onChange={(e) => setNewWhitelist(e.target.value)} placeholder="允许厂商，逗号分隔（留空=全部）" className="border border-gray-200 rounded-lg px-3 py-2 text-xs" />
+              <input value={newBlacklist} onChange={(e) => setNewBlacklist(e.target.value)} placeholder="排除厂商，逗号分隔" className="border border-gray-200 rounded-lg px-3 py-2 text-xs" />
+              <input type="number" min="1" value={newRpm} onChange={(e) => setNewRpm(e.target.value)} placeholder="每分钟上限 RPM" className="border border-gray-200 rounded-lg px-3 py-2 text-xs" />
+              <input type="number" min="1" value={newRpd} onChange={(e) => setNewRpd(e.target.value)} placeholder="每日上限 RPD" className="border border-gray-200 rounded-lg px-3 py-2 text-xs" />
+              <input type="number" min="1" value={newMinContext} onChange={(e) => setNewMinContext(e.target.value)} placeholder="最小上下文，如 32000" className="border border-gray-200 rounded-lg px-3 py-2 text-xs" />
+              <select value={newPrefer} onChange={(e) => setNewPrefer(e.target.value as 'latency' | 'capability')} className="border border-gray-200 rounded-lg px-3 py-2 text-xs bg-white">
+                <option value="latency">优先低延迟</option>
+                <option value="capability">优先大模型</option>
+              </select>
+              <p className="sm:col-span-2 text-[11px] text-gray-400">请求级策略可以继续排除厂商或提高上下文下限，但不能放宽这里的权限。</p>
+            </div>
+          )}
         </div>
       </div>
 

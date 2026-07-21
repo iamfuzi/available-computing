@@ -1,3 +1,4 @@
+import { useCallback, useEffect, useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import Pool from './pages/Pool'
 import Channels from './pages/Channels'
@@ -5,6 +6,10 @@ import ModelDetail from './pages/ModelDetail'
 import Settings from './pages/Settings'
 import ApiDocs from './pages/ApiDocs'
 import Login from './pages/Login'
+import Candidates from './pages/Candidates'
+import Notifications from './pages/Notifications'
+import { notificationsApi } from './api/client'
+import { useWebSocket } from './hooks/useWebSocket'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem('token')
@@ -13,6 +18,12 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 }
 
 function Layout({ children }: { children: React.ReactNode }) {
+  const [unread, setUnread] = useState(0)
+  const loadUnread = useCallback(() => {
+    notificationsApi.unreadCount().then((result) => setUnread(result.count)).catch(() => {})
+  }, [])
+  useEffect(() => { loadUnread() }, [loadUnread])
+  useWebSocket(() => { loadUnread() })
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-2 text-sm px-3 py-2 rounded-lg transition-colors ${
       isActive
@@ -33,6 +44,13 @@ function Layout({ children }: { children: React.ReactNode }) {
           </NavLink>
           <NavLink to="/channels" className={linkClass}>
             <span>🔌</span><span>厂商管理</span>
+          </NavLink>
+          <NavLink to="/candidates" className={linkClass}>
+            <span>🧭</span><span>候选厂商</span>
+          </NavLink>
+          <NavLink to="/notifications" className={linkClass}>
+            <span>🔔</span><span>消息中心</span>
+            {unread > 0 && <span className="ml-auto bg-red-500 text-white text-[10px] min-w-5 h-5 px-1 rounded-full flex items-center justify-center">{unread > 99 ? '99+' : unread}</span>}
           </NavLink>
           <NavLink to="/settings" className={linkClass}>
             <span>⚙️</span><span>设置</span>
@@ -56,6 +74,8 @@ function Layout({ children }: { children: React.ReactNode }) {
         {[
           { to: '/', end: true, icon: '📊', label: '算力池' },
           { to: '/channels', icon: '🔌', label: '厂商' },
+          { to: '/candidates', icon: '🧭', label: '候选' },
+          { to: '/notifications', icon: unread > 0 ? `🔔${unread}` : '🔔', label: '消息' },
           { to: '/settings', icon: '⚙️', label: '设置' },
           { to: '/docs', icon: '📖', label: '文档' },
         ].map((item) => (
@@ -95,6 +115,8 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<RequireAuth><Layout><Pool /></Layout></RequireAuth>} />
         <Route path="/channels" element={<RequireAuth><Layout><Channels /></Layout></RequireAuth>} />
+        <Route path="/candidates" element={<RequireAuth><Layout><Candidates /></Layout></RequireAuth>} />
+        <Route path="/notifications" element={<RequireAuth><Layout><Notifications /></Layout></RequireAuth>} />
         <Route path="/models/:id" element={<RequireAuth><Layout><ModelDetail /></Layout></RequireAuth>} />
         <Route path="/settings" element={<RequireAuth><Layout><Settings /></Layout></RequireAuth>} />
         <Route path="/docs" element={<RequireAuth><Layout><ApiDocs /></Layout></RequireAuth>} />

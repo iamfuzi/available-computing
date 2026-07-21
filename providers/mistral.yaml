@@ -1,0 +1,55 @@
+version: 1
+id: mistral
+name: Mistral AI
+config_type: declarative
+base_url: https://api.mistral.ai/v1
+
+auth:
+  type: bearer
+  header: Authorization
+
+endpoints:
+  models: /models
+  chat_completions: /chat/completions
+
+model_mapping:
+  items_path: data
+  id_path: id
+  display_name_path: id
+  context_length_path: max_context_length
+  vision_capability_path: capabilities.vision
+
+# The account catalog can contain models outside the Free plan. Keep this list
+# intentionally small and expand it only after an official review.
+free_detection:
+  method: allowlist
+  model_ids:
+    - mistral-small-latest
+  free_type: quota
+
+model_overrides:
+  mistral-small-latest:
+    display_name: Mistral Small (latest)
+    category: text
+
+probe:
+  prompt: Reply with OK
+  max_tokens: 8
+
+requirements:
+  requires_card: false
+  requires_phone: false
+  requires_realname: false
+
+setup:
+  description: Experiment 免费计划，无需绑定信用卡，额度较低
+  key_hint: Mistral AI Studio → API Keys → Create new key
+  console_url: https://console.mistral.ai/api-keys
+
+compliance:
+  risk: medium
+  note: 商业条款允许向 End Users 提供集成能力，但禁止买卖或转让 API Key；本项目限定个人自用，不共享上游 Key，免费订阅输入输出的数据使用设置也需由账户持有人确认。
+  reviewed_at: '2026-07-21'
+  sources:
+    - https://legal.mistral.ai/terms/commercial-terms-of-service
+    - https://legal.mistral.ai/terms/usage-policy

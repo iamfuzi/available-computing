@@ -1,16 +1,18 @@
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select, func
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from database import get_session
-from models import Channel, Model
+from models import CandidateProvider, HealthRecord, Notification, Channel, Model
 from api.auth import verify_token
+from services.notifications import CHANNEL_ALERT_STATUSES, reconcile_notifications
 
 router = APIRouter()
 
 
 @router.get("/summary")
 def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token)):
+    reconcile_notifications(session)
     total_channels = session.exec(select(func.count(Channel.id))).one()
     enabled_channels = session.exec(
         select(func.count(Channel.id)).where(Channel.enabled == True)
@@ -34,7 +36,35 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
                 status = "rate_limited"
         health_dist[status] = health_dist.get(status, 0) + 1
 
-    usable = health_dist.get("healthy", 0)
+    usable = health_dist.get("healthy", 0) + health_dist.get("slow", 0)
+
+    invalid_key_count = len(session.exec(
+        select(Channel).where(Channel.status.in_(CHANNEL_ALERT_STATUSES))
+    ).all())
+    pending_candidate_count = len(session.exec(
+        select(CandidateProvider)
+        .where(CandidateProvider.is_present == True)
+        .where(CandidateProvider.status == "pending")
+        .where(CandidateProvider.admission_status == "review_required")
+    ).all())
+    pending_policy_change_count = len(session.exec(
+        select(Notification)
+        .where(Notification.category == "policy_change")
+        .where(Notification.resolved_at == None)
+        .where(Notification.status != "dismissed")
+    ).all())
+    unread_notification_count = len(session.exec(
+        select(Notification)
+        .where(Notification.status == "unread")
+        .where(Notification.resolved_at == None)
+    ).all())
+    day_ago = now - timedelta(hours=24)
+    rechecks = session.exec(
+        select(HealthRecord)
+        .where(HealthRecord.verification_method == "active_event_triggered")
+        .where(HealthRecord.checked_at >= day_ago)
+    ).all()
+    recheck_count_24h = len({record.check_run_id or str(record.id) for record in rechecks})
 
     return {
         "total_channels": total_channels,
@@ -42,4 +72,9 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
         "free_model_count": len(free_models),
         "available_model_count": usable,
         "health_distribution": health_dist,
+        "invalid_key_count": invalid_key_count,
+        "pending_candidate_count": pending_candidate_count,
+        "pending_policy_change_count": pending_policy_change_count,
+        "recheck_count_24h": recheck_count_24h,
+        "unread_notification_count": unread_notification_count,
     }

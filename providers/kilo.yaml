@@ -1,0 +1,52 @@
+version: 1
+id: kilo-code
+name: Kilo Gateway
+config_type: declarative
+base_url: https://api.kilo.ai/api/gateway
+
+auth:
+  type: none
+
+endpoints:
+  models: /models
+  chat_completions: /chat/completions
+
+model_mapping:
+  items_path: data
+  id_path: id
+  display_name_path: name
+  context_length_path: context_length
+
+# Kilo's official catalog identifies no-cost models with the :free suffix.
+# kilo-auto/free is the documented free router and is included explicitly.
+free_detection:
+  method: id_suffix
+  id_suffix: ':free'
+  model_ids:
+    - kilo-auto/free
+  free_type: quota
+
+probe:
+  prompt: Reply with OK
+  max_tokens: 16
+
+requirements:
+  requires_card: false
+  requires_phone: false
+  requires_realname: false
+
+setup:
+  description: 免费模型无需注册或 API Key；每 IP 200 请求/小时
+  key_hint: 匿名免费模型无需 API Key，直接添加即可
+  console_url: https://kilo.ai/docs/gateway/authentication
+  key_optional: true
+
+compliance:
+  risk: medium
+  note: Kilo 条款明确允许通过自有应用调用 Gateway，但应用使用者也必须遵守 Kilo 条款和限制；部分免费模型可能要求允许数据收集，且免费模型清单会变化。本项目仅供个人使用，不转售、不共享凭证。
+  reviewed_at: '2026-07-21'
+  sources:
+    - https://kilo.ai/terms
+    - https://kilo.ai/docs/gateway/authentication
+    - https://kilo.ai/docs/gateway/usage-and-billing
+    - https://kilo.ai/docs/gateway/models-and-providers

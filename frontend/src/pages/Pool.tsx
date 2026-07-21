@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { poolApi, modelsApi, channelsApi } from '../api/client'
-import type { ModelRow, PoolSummary } from '../api/client'
+import { poolApi, modelsApi, channelsApi, notificationsApi } from '../api/client'
+import type { ModelRow, NotificationRow, PoolSummary } from '../api/client'
 import { useWebSocket } from '../hooks/useWebSocket'
 import StatCard from '../components/StatCard'
 import HealthBadge from '../components/HealthBadge'
+import FreshnessBadge from '../components/FreshnessBadge'
 import FreeTypeBadge from '../components/FreeTypeBadge'
 import AddChannelModal from '../components/AddChannelModal'
 
@@ -21,6 +22,7 @@ export default function Pool() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [menuOpen, setMenuOpen] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [notifications, setNotifications] = useState<NotificationRow[]>([])
   const [channels, setChannels] = useState<{id: string, name: string, provider_type: string}[]>([])
   const [provider, setProvider] = useState('')
   const menuRef = useRef<HTMLDivElement>(null)
@@ -31,7 +33,7 @@ export default function Pool() {
   const loadData = useCallback(async (signal?: AbortSignal) => {
     setLoading(true)
     try {
-      const [s, m] = await Promise.all([
+      const [s, m, n] = await Promise.all([
         poolApi.summary(),
         modelsApi.list({
           free_only: true,
@@ -41,9 +43,11 @@ export default function Pool() {
           provider: provider || undefined,
           sort_by: sortBy,
         }, signal),
+        notificationsApi.list(),
       ])
       setSummary(s)
       setModels(m)
+      setNotifications(n)
     } catch (e) {
       if (!(e instanceof Error && e.name === 'AbortError')) throw e
     } finally {
@@ -76,7 +80,7 @@ export default function Pool() {
     return () => document.removeEventListener('mousedown', handler)
   }, [menuOpen])
 
-  useWebSocket((_event) => { loadData() })
+  useWebSocket(() => { loadData() })
 
   function copyText(text: string) {
     navigator.clipboard.writeText(text)
@@ -114,30 +118,53 @@ export default function Pool() {
       {summary && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <StatCard
-            label="接入厂商"
-            value={`${summary.enabled_channels}/${summary.total_channels}`}
+            label="当前可用 / 待确认"
+            value={`${summary.available_model_count} / ${summary.pending_policy_change_count}`}
+            onClick={() => summary.pending_policy_change_count > 0 ? navigate('/notifications') : undefined}
+          />
+          <StatCard
+            label="失效或受限 Key"
+            value={summary.invalid_key_count}
             onClick={() => navigate('/channels')}
           />
-          <StatCard label="当前可调用" value={summary.available_model_count} />
           <StatCard
-            label="已发现免费"
-            value={summary.free_model_count}
-            sub={
-              [summary.health_distribution.rate_limited, summary.health_distribution.slow, summary.health_distribution.down]
-                .filter(Boolean)
-                .length
-                ? `限流 ${summary.health_distribution.rate_limited ?? 0} · 慢 ${summary.health_distribution.slow ?? 0} · 异常 ${summary.health_distribution.down ?? 0}`
-                : undefined
-            }
+            label="候选厂商待审核"
+            value={summary.pending_candidate_count}
+            onClick={() => navigate('/candidates')}
           />
-          <StatCard
-            label="平均延迟"
-            value={
-              models.length > 0 && models.some(m => m.last_response_ms)
-                ? `${Math.round(models.filter(m => m.last_response_ms).reduce((s, m) => s + (m.last_response_ms || 0), 0) / models.filter(m => m.last_response_ms).length)}ms`
-                : '—'
-            }
-          />
+          <StatCard label="24h 事件复检" value={summary.recheck_count_24h} />
+        </div>
+      )}
+
+      {/* Active alerts stay separate from the model table. */}
+      {notifications.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-4 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="font-medium text-sm text-gray-900">需要处理</div>
+            <button onClick={() => navigate('/notifications')} className="text-xs text-blue-600">查看全部 {notifications.length}</button>
+          </div>
+          <div className="grid md:grid-cols-2 gap-2">
+            {notifications.slice(0, 4).map((item) => (
+              <button
+                key={item.id}
+                onClick={async () => {
+                  if (item.status === 'unread') await notificationsApi.update(item.id, 'read')
+                  navigate(item.action_path || '/notifications')
+                }}
+                className={`text-left rounded-xl border px-3 py-2.5 ${
+                  item.severity === 'critical' ? 'border-red-200 bg-red-50' :
+                  item.severity === 'warning' ? 'border-amber-200 bg-amber-50' :
+                  'border-blue-200 bg-blue-50'
+                }`}
+              >
+                <div className="flex items-center gap-2 text-sm font-medium text-gray-900">
+                  {item.status === 'unread' && <span className="w-2 h-2 rounded-full bg-red-500" />}
+                  <span>{item.title}</span>
+                </div>
+                <p className="text-xs text-gray-500 mt-1 line-clamp-2">{item.message}</p>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -151,7 +178,6 @@ export default function Pool() {
             {([
               { id: 'groq', name: 'Groq', desc: '全免费' },
               { id: 'siliconflow', name: 'SiliconFlow', desc: '部分免费' },
-              { id: 'gemini', name: 'Gemini', desc: '免费额度' },
               { id: 'agnes', name: 'Agnes AI', desc: 'flash 免费' },
             ] as const).map((p) => (
               <button
@@ -291,7 +317,14 @@ export default function Pool() {
                         <FreeTypeBadge freeType={m.free_type} source={m.free_source} />
                       </td>
                       <td className="px-4 py-3">
-                        <HealthBadge status={m.health_status} responseMs={m.last_response_ms} />
+                        <div className="flex flex-col items-start gap-1">
+                          <HealthBadge status={m.health_status} responseMs={m.last_response_ms} />
+                          <FreshnessBadge
+                            lastVerifiedAt={m.last_verified_at}
+                            thresholdDays={m.staleness_threshold_days}
+                            method={m.verification_method}
+                          />
+                        </div>
                       </td>
                       <td className="px-4 py-3 relative" onClick={(e) => e.stopPropagation()}>
                         <div ref={menuOpen === m.id ? menuRef : undefined}>

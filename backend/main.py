@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
 from database import create_db_and_tables
-from api import auth, channels, models, pool, settings, apikeys
+from api import auth, channels, models, pool, settings, apikeys, candidates, notifications
 from api.proxy import router as proxy_router
 from ws.events import router as ws_router, start_cleanup_task
 from services.scheduler import init_scheduler, shutdown_scheduler
@@ -63,6 +63,8 @@ app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(pool.router, prefix="/api/v1/pool", tags=["pool"])
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
 app.include_router(apikeys.router, prefix="/api/v1/apikeys", tags=["apikeys"])
+app.include_router(candidates.router, prefix="/api/v1/candidates", tags=["candidates"])
+app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
 
 # WebSocket
 app.include_router(ws_router)

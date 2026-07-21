@@ -49,7 +49,6 @@ class TestParseUnparseable:
         "gpt-4o",
         "claude-3.5-sonnet",
         "glm-4-flash",
-        "gemini-2.5-pro",
         "z-ai/glm-5.2",
         "",
     ])

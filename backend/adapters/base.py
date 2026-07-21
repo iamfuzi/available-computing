@@ -36,6 +36,21 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def default_base_url(self) -> str: ...
 
+    def request_headers(self, key: str) -> dict[str, str]:
+        """Return provider-specific authentication headers for proxy calls.
+
+        Existing custom adapters use Bearer authentication. Declarative
+        adapters can override this for anonymous or otherwise configured
+        authentication without making the proxy layer duplicate provider
+        rules.
+        """
+        return {"Authorization": f"Bearer {key}"}
+
+    @property
+    def requires_api_key(self) -> bool:
+        """Whether an upstream auth failure is evidence that a saved key died."""
+        return True
+
     @abstractmethod
     async def validate_key(self, key: str, base_url: str) -> None:
         """Raise an exception if the key is invalid."""

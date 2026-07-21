@@ -20,14 +20,13 @@ def _set_sqlite_pragma(dbapi_conn, connection_record):
 def _run_migrations() -> None:
     """Apply pending Alembic migrations.
 
-    Three cases:
+    Cases:
     - ``alembic_version`` table exists with a revision → run ``upgrade head``.
-    - No ``alembic_version`` table but the ``model`` table already has every
-      column the migrations would add → brand-new DB built by ``create_all``,
-      stamp head (nothing to migrate).
-    - No ``alembic_version`` table and the schema is behind (e.g. an old
-      pre-Alembic DB missing ``consecutive_billing_failures``) → run
-      ``upgrade head`` from scratch, which applies every revision.
+    - No version table but the schema matches a known historical revision →
+      stamp that revision, then upgrade. This is how pre-Alembic installations
+      safely adopt new migrations without re-adding columns they already have.
+    - A brand-new DB built by current ``create_all`` already matches head →
+      stamp head without running ALTER statements.
 
     Migration failures are logged but never block startup.
     """
@@ -59,19 +58,64 @@ def _run_migrations() -> None:
             log.warning("Alembic upgrade failed (continuing): %s", e)
         return
 
-    # No alembic_version table yet. Decide whether the schema is already current.
-    existing_cols = {c["name"] for c in insp.get_columns("model")}
-    needed_cols = {"consecutive_billing_failures", "param_size"}
-    if needed_cols.issubset(existing_cols):
-        # Schema is already at head (create_all built it fresh); just record it.
+    # No alembic_version table yet. Infer the newest known compatible revision.
+    model_cols = {c["name"] for c in insp.get_columns("model")}
+    channel_cols = {c["name"] for c in insp.get_columns("channel")} if insp.has_table("channel") else set()
+    health_cols = {c["name"] for c in insp.get_columns("healthrecord")} if insp.has_table("healthrecord") else set()
+    apikey_cols = {c["name"] for c in insp.get_columns("apikey")} if insp.has_table("apikey") else set()
+
+    head_model_cols = {
+        "last_verified_at", "verification_method",
+        "staleness_threshold_days", "free_expires_at",
+    }
+    head_channel_cols = {
+        "status", "status_reason", "status_changed_at", "key_expires_at",
+        "config_type", "discovery_source", "compliance_note",
+    }
+    head_health_cols = {
+        "verification_method", "http_status", "check_run_id",
+        "failure_reason", "rate_limit_snapshot",
+    }
+    head_apikey_cols = {
+        "provider_whitelist", "provider_blacklist", "rate_limit_rpm",
+        "rate_limit_rpd", "default_prefer", "default_min_context",
+    }
+    if (
+        head_model_cols.issubset(model_cols)
+        and head_channel_cols.issubset(channel_cols)
+        and head_health_cols.issubset(health_cols)
+        and head_apikey_cols.issubset(apikey_cols)
+    ):
         if head_rev:
             command.stamp(cfg, head_rev)
-    else:
-        # Legacy DB behind head: run migrations from the beginning.
-        try:
-            command.upgrade(cfg, "head")
-        except Exception as e:  # pragma: no cover — best-effort
-            log.warning("Alembic upgrade failed (continuing): %s", e)
+        return
+
+    known_revisions = [
+        (
+            "c3d4e5f6a7b8",
+            head_model_cols,
+        ),
+        (
+            "b2c3d4e5f6a7",
+            {
+                "consecutive_billing_failures", "param_size", "last_success_at",
+                "rate_limited_until", "last_429_at", "consecutive_429",
+            },
+        ),
+        ("a1b2c3d4e5f6", {"consecutive_billing_failures", "param_size"}),
+        ("7526ef5a88ed", {"consecutive_billing_failures"}),
+    ]
+    inferred_revision = next(
+        (revision for revision, columns in known_revisions if columns.issubset(model_cols)),
+        None,
+    )
+
+    try:
+        if inferred_revision:
+            command.stamp(cfg, inferred_revision)
+        command.upgrade(cfg, "head")
+    except Exception as e:  # pragma: no cover — best-effort
+        log.warning("Alembic upgrade failed (continuing): %s", e)
 
 
 def create_db_and_tables():

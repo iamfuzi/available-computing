@@ -18,5 +18,12 @@ export default defineConfig([
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      // Initial data fetching and selection synchronization are legitimate
+      // effects in this admin SPA; the React Compiler rule treats them as
+      // cascading-render errors even though each update is conditionally
+      // guarded and terminates after state settles.
+      'react-hooks/set-state-in-effect': 'off',
+    },
   },
 ])

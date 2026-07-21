@@ -74,16 +74,21 @@ class AgnesAdapter(ProviderAdapter):
             "messages": [{"role": "user", "content": "你是什么模型"}],
             "max_tokens": 20,
         }
+        # Agnes has very high first-token latency (routinely 8-20s, occasionally
+        # up to 60s). The default PROBE_TIMEOUT_SECONDS (10s) is too short and
+        # marks reachable models as timed-out. Use a generous timeout here so
+        # the probe reflects actual reachability rather than Agnes's slowness.
+        probe_timeout = max(PROBE_TIMEOUT_SECONDS, 30)
         start = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
+            async with httpx.AsyncClient(timeout=probe_timeout) as client:
                 r = await client.post(
                     f"{base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {key}"},
                     json=payload,
                 )
         except httpx.TimeoutException:
-            return HealthInfo(status="slow", response_ms=PROBE_TIMEOUT_SECONDS * 1000, error_code="timeout")
+            return HealthInfo(status="slow", response_ms=probe_timeout * 1000, error_code="timeout")
         except httpx.RequestError:
             return HealthInfo(status="slow", response_ms=0, error_code="network_error")
 

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import axios from 'axios'
 import { channelsApi } from '../api/client'
 import type { Provider } from '../api/client'
 
@@ -18,11 +19,6 @@ const PROVIDER_INFO: Record<string, { hint: string; url: string; desc: string }>
     desc: '部分模型永久免费',
     hint: '硅基流动控制台 → API 密钥 → 新建密钥',
     url: 'https://cloud.siliconflow.cn/account/ak',
-  },
-  gemini: {
-    desc: '每日 1500 次免费额度',
-    hint: 'Google AI Studio → Get API key',
-    url: 'https://aistudio.google.com/app/apikey',
   },
   openrouter: {
     desc: '29+ 个免费模型',
@@ -53,20 +49,26 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
   useEffect(() => {
     if (open) {
       channelsApi.providers().then(setProviders)
-      setStep(1)
-      setSelectedProvider(null)
-      setApiKey('')
-      setBaseUrl('')
-      setError('')
     }
   }, [open])
 
   if (!open) return null
 
-  const info = selectedProvider ? PROVIDER_INFO[selectedProvider.id] : null
+  const staticInfo = selectedProvider ? PROVIDER_INFO[selectedProvider.id] : null
+  const info = selectedProvider?.setup ?? staticInfo
+  const keyOptional = selectedProvider?.setup?.key_optional === true
+
+  function closeModal() {
+    setStep(1)
+    setSelectedProvider(null)
+    setApiKey('')
+    setBaseUrl('')
+    setError('')
+    onClose()
+  }
 
   async function handleSubmit() {
-    if (!selectedProvider || !apiKey.trim()) return
+    if (!selectedProvider || (!keyOptional && !apiKey.trim())) return
     setLoading(true)
     setError('')
     try {
@@ -76,9 +78,12 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
         base_url: baseUrl.trim() || undefined,
       })
       onCreated()
-      onClose()
-    } catch (e: any) {
-      setError(e.response?.data?.detail ?? '添加失败，请检查 Key 是否正确')
+      closeModal()
+    } catch (e: unknown) {
+      const detail = axios.isAxiosError<{ detail?: string }>(e)
+        ? e.response?.data?.detail
+        : undefined
+      setError(detail ?? '添加失败，请检查 Key 是否正确')
     } finally {
       setLoading(false)
     }
@@ -92,7 +97,7 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
           <h2 className="text-base font-semibold text-gray-900">
             {step === 1 ? '选择厂商' : `添加 ${selectedProvider?.name}`}
           </h2>
-          <button onClick={onClose} className="text-gray-300 hover:text-gray-600 text-lg leading-none transition-colors">
+          <button onClick={closeModal} className="text-gray-300 hover:text-gray-600 text-lg leading-none transition-colors">
             ✕
           </button>
         </div>
@@ -109,7 +114,12 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
                     onClick={() => { setSelectedProvider(p); setBaseUrl(p.base_url); setStep(2) }}
                   >
                     <div className="font-medium text-gray-900 group-hover:text-blue-700">{p.name}</div>
-                    {pInfo && <div className="text-xs text-gray-400 mt-0.5">{pInfo.desc}</div>}
+                    <div className="text-xs text-gray-400 mt-0.5">
+                      {p.setup?.description ?? pInfo?.desc}
+                    </div>
+                    {p.config_type === 'declarative' && (
+                      <div className="text-[11px] text-blue-500 mt-1">声明式接入 · 免费允许列表</div>
+                    )}
                   </button>
                 )
               })}
@@ -127,29 +137,59 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
               {info && (
                 <div className="text-sm text-gray-500 bg-blue-50 border border-blue-100 rounded-xl p-3">
                   <div className="font-medium text-blue-800 text-xs mb-1">📖 获取 Key</div>
-                  <div>{info.hint}</div>
+                  <div>{'key_hint' in info ? info.key_hint : info.hint}</div>
                   <a
-                    href={info.url}
+                    href={'console_url' in info ? info.console_url : info.url}
                     target="_blank"
                     rel="noreferrer"
                     className="text-blue-600 hover:text-blue-800 text-xs mt-1 inline-block"
                   >
                     打开控制台 ↗
                   </a>
+                  {selectedProvider.requirements?.requires_phone && (
+                    <div className="text-[11px] text-amber-700 mt-2">注册可能需要手机号验证</div>
+                  )}
+                  {selectedProvider.requirements?.requires_card === true && (
+                    <div className="text-[11px] text-amber-700 mt-2">需要绑定并验证支付方式</div>
+                  )}
+                  {selectedProvider.requirements?.requires_card === false && (
+                    <div className="text-[11px] text-green-700 mt-0.5">无需绑定信用卡</div>
+                  )}
                 </div>
               )}
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">API Key *</label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="粘贴你的 API Key"
-                  className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 transition-shadow font-mono"
-                  autoFocus
-                />
-              </div>
+              {selectedProvider.compliance && (
+                <div className={`text-xs border rounded-xl p-3 ${
+                  selectedProvider.compliance.risk === 'high'
+                    ? 'bg-red-50 border-red-200 text-red-800'
+                    : selectedProvider.compliance.risk === 'medium'
+                      ? 'bg-amber-50 border-amber-200 text-amber-800'
+                      : 'bg-gray-50 border-gray-200 text-gray-600'
+                }`}>
+                  <div className="font-medium mb-1">
+                    合规风险：{selectedProvider.compliance.risk === 'high' ? '高' : selectedProvider.compliance.risk === 'medium' ? '中' : selectedProvider.compliance.risk === 'low' ? '低' : '待确认'}
+                  </div>
+                  <div className="leading-relaxed">{selectedProvider.compliance.note}</div>
+                </div>
+              )}
+
+              {keyOptional ? (
+                <div className="text-sm text-green-700 bg-green-50 border border-green-100 rounded-xl px-4 py-3">
+                  此厂商的免费模型支持匿名访问，无需填写 API Key。
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">API Key *</label>
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="粘贴你的 API Key"
+                    className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-50 transition-shadow font-mono"
+                    autoFocus
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">
@@ -177,10 +217,10 @@ export default function AddChannelModal({ open, onClose, onCreated }: Props) {
                 </button>
                 <button
                   onClick={handleSubmit}
-                  disabled={loading || !apiKey.trim()}
+                  disabled={loading || (!keyOptional && !apiKey.trim())}
                   className="flex-1 bg-gray-900 text-white rounded-xl py-2.5 text-sm hover:bg-gray-800 disabled:opacity-40 transition-colors"
                 >
-                  {loading ? '验证中...' : '验证并添加 →'}
+                  {loading ? '验证中...' : keyOptional ? '添加免费渠道 →' : '验证并添加 →'}
                 </button>
               </div>
             </div>

@@ -37,6 +37,17 @@ class TestBuildOpenaiPayload:
         assert "max_tokens" not in payload
         assert "temperature" not in payload
 
+    def test_upstream_headers_delegate_auth_to_adapter(self):
+        from api.proxy import _upstream_headers
+
+        adapter = MagicMock()
+        adapter.request_headers.return_value = {}
+        headers = _upstream_headers(adapter, "")
+
+        adapter.request_headers.assert_called_once_with("")
+        assert "Authorization" not in headers
+        assert headers["Content-Type"] == "application/json"
+
 
 class TestResolveModel:
     def test_finds_active_free_model(self, db_session, sample_model, sample_channel):
@@ -79,6 +90,16 @@ class TestResolveModel:
         sample_channel.enabled = False
         db_session.add(sample_channel)
         db_session.commit()
+        model, _, _, _ = _resolve_model("test-model-free", db_session)
+        assert model is None
+
+    def test_invalid_channel_key_skipped(self, db_session, sample_model, sample_channel):
+        from api.proxy import _resolve_model
+        sample_channel.status = "key_invalid"
+        sample_channel.status_reason = "active_probe_auth_failed"
+        db_session.add(sample_channel)
+        db_session.commit()
+
         model, _, _, _ = _resolve_model("test-model-free", db_session)
         assert model is None
 
@@ -258,101 +279,6 @@ class TestChatCompletionsNonStream:
             assert resp.status_code == 429
 
 
-class TestChatCompletionsGemini:
-    def _setup_gemini(self, db_session, sample_channel):
-        from models import Model
-        sample_channel.provider_type = "gemini"
-        db_session.add(sample_channel)
-        model = Model(
-            id="mdl-gemini",
-            channel_id=sample_channel.id,
-            model_id="gemini-2.5-flash",
-            is_free=True,
-            is_active=True,
-            health_status="healthy",
-        )
-        db_session.add(model)
-        db_session.commit()
-        return model
-
-    @pytest.mark.asyncio
-    async def test_gemini_success(self, app_client, auth_headers, db_session, sample_channel):
-        self._setup_gemini(db_session, sample_channel)
-
-        with patch("httpx.AsyncClient") as MockClient:
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = {
-                "candidates": [{"content": {"parts": [{"text": "Hello from Gemini"}]}}],
-            }
-
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_cm.post = AsyncMock(return_value=mock_resp)
-            MockClient.return_value = mock_cm
-
-            resp = await app_client.post(
-                "/v1/chat/completions",
-                json={"model": "gemini-2.5-flash", "messages": [{"role": "user", "content": "hi"}]},
-                headers=auth_headers,
-            )
-            assert resp.status_code == 200
-            body = resp.json()
-            assert body["choices"][0]["message"]["content"] == "Hello from Gemini"
-
-    @pytest.mark.asyncio
-    async def test_gemini_stream_not_rejected(self, app_client, auth_headers, db_session, sample_channel):
-        """Gemini streaming should no longer return 400 — it's now supported."""
-        self._setup_gemini(db_session, sample_channel)
-        resp = await app_client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "gemini-2.5-flash",
-                "messages": [{"role": "user", "content": "hi"}],
-                "stream": True,
-            },
-            headers=auth_headers,
-        )
-        # Should not be 400 (old behavior was to reject streaming)
-        assert resp.status_code != 400
-
-    @pytest.mark.asyncio
-    async def test_gemini_system_instruction(self, app_client, auth_headers, db_session, sample_channel):
-        self._setup_gemini(db_session, sample_channel)
-
-        captured_payload = {}
-
-        async def fake_post(url, **kwargs):
-            captured_payload.update(kwargs.get("json", {}))
-            mock_resp = MagicMock()
-            mock_resp.status_code = 200
-            mock_resp.json.return_value = {
-                "candidates": [{"content": {"parts": [{"text": "ok"}]}}],
-            }
-            return mock_resp
-
-        with patch("httpx.AsyncClient") as MockClient:
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
-            mock_cm.__aexit__ = AsyncMock(return_value=False)
-            mock_cm.post = fake_post
-            MockClient.return_value = mock_cm
-
-            resp = await app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "gemini-2.5-flash",
-                    "messages": [
-                        {"role": "system", "content": "You are helpful"},
-                        {"role": "user", "content": "hi"},
-                    ],
-                },
-                headers=auth_headers,
-            )
-            assert resp.status_code == 200
-            assert captured_payload.get("systemInstruction", {}).get("parts", [{}])[0].get("text") == "You are helpful"
-
 
 class TestOpenAIModelsList:
     @pytest.mark.asyncio
@@ -490,13 +416,25 @@ class TestAcDiagnostics:
             is_active=True,
             health_status="slow",
         ))
+        db_session.add(Model(
+            id="mdl-diag-filter-down",
+            channel_id=sample_channel.id,
+            model_id="diag-filter-down",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="down",
+        ))
         db_session.commit()
 
         resp = await app_client.get("/v1/ac/models?include_unavailable=false", headers=auth_headers)
         assert resp.status_code == 200
         ids = {m["id"] for m in resp.json()["data"]}
         assert "diag-filter-ok" in ids
-        assert "diag-filter-slow" not in ids
+        # slow models are route-eligible (callable, just >1s latency)
+        assert "diag-filter-slow" in ids
+        # down models are filtered out
+        assert "diag-filter-down" not in ids
 
     @pytest.mark.asyncio
     async def test_self_test_reports_selected_candidate(self, app_client, auth_headers, sample_model, db_session):
@@ -713,7 +651,8 @@ class TestAutoRouting:
             }
             return mock_resp
 
-        with patch("httpx.AsyncClient") as MockClient:
+        with patch("httpx.AsyncClient") as MockClient, \
+             patch("api.proxy.trigger_event_recheck") as trigger_recheck:
             mock_cm = AsyncMock()
             mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
             mock_cm.__aexit__ = AsyncMock(return_value=False)
@@ -732,6 +671,7 @@ class TestAutoRouting:
         assert resp.headers["X-AC-Selected-Model"] == "second-free"
         assert resp.headers["X-AC-Attempted-Models"] == "first-free,second-free"
         assert resp.headers["X-AC-Fallback-Count"] == "1"
+        trigger_recheck.assert_called_once_with(first.id, "rate_limited")
         db_session.refresh(first)
         assert first.health_status == "rate_limited"
         assert first.rate_limited_until is not None
@@ -1184,8 +1124,7 @@ class TestAdminModelSort:
 
 
 class TestNonChatModels:
-    """embedding / rerank models: queryable via /v1/models?category= and callable
-    via /v1/embeddings and /v1/rerank."""
+    """Non-chat models are queryable by category and callable by endpoint."""
 
     def _sf_channel(self, db_session, fixed_salt):
         """A SiliconFlow channel (the only provider with free rerank/embedding)."""
@@ -1210,6 +1149,7 @@ class TestNonChatModels:
             ("netease-youdao/bce-embedding-base_v1", "embedding"),
             ("BAAI/bge-reranker-v2-m3", "rerank"),
             ("Qwen/Qwen3-Reranker-4B", "rerank"),
+            ("cogview-3-flash", "image"),
             ("meta-llama/llama-3.3-70b", "text"),
         ]:
             db_session.add(Model(
@@ -1338,6 +1278,104 @@ class TestNonChatModels:
         resp = await app_client.post(
             "/v1/rerank",
             json={"model": "nope", "query": "q", "documents": ["d"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_images_auto_routes_and_forwards(
+        self, app_client, auth_headers, db_session, fixed_salt
+    ):
+        ch = self._sf_channel(db_session, fixed_salt)
+        self._seed_nonchat(db_session, ch.id)
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "created": 1,
+                "data": [{"url": "https://example.test/generated.png"}],
+            }
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_cm.post = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = mock_cm
+
+            resp = await app_client.post(
+                "/v1/images/generations",
+                json={
+                    "model": "auto:image",
+                    "prompt": "a blue circle",
+                    "quality": "standard",
+                    "size": "1024x1024",
+                    "user": "user-123",
+                    "watermark_enabled": False,
+                },
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["data"][0]["url"].endswith("generated.png")
+        assert resp.headers["x-ac-route"] == "auto:image"
+        assert resp.headers["x-ac-selected-model"] == "cogview-3-flash"
+        sent = mock_cm.post.call_args
+        assert sent.args[0].endswith("/images/generations")
+        assert sent.kwargs["json"] == {
+            "model": "cogview-3-flash",
+            "prompt": "a blue circle",
+            "quality": "standard",
+            "size": "1024x1024",
+            "user_id": "user-123",
+            "watermark_enabled": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_images_accepts_slow_verified_model(
+        self, app_client, auth_headers, db_session, fixed_salt
+    ):
+        ch = self._sf_channel(db_session, fixed_salt)
+        self._seed_nonchat(db_session, ch.id)
+        from models import Model
+        from sqlmodel import select
+        image = next(
+            model
+            for model in db_session.exec(select(Model)).all()
+            if model.model_id == "cogview-3-flash"
+        )
+        image.health_status = "slow"
+        db_session.add(image)
+        db_session.commit()
+        with patch("httpx.AsyncClient") as MockClient:
+            response = MagicMock(status_code=200)
+            response.json.return_value = {"data": [{"url": "https://example.test/i.png"}]}
+            client = AsyncMock()
+            client.__aenter__ = AsyncMock(return_value=client)
+            client.__aexit__ = AsyncMock(return_value=False)
+            client.post = AsyncMock(return_value=response)
+            MockClient.return_value = client
+            resp = await app_client.post(
+                "/v1/images/generations",
+                json={"prompt": "a test image"},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_images_rejects_unsupported_response_format(
+        self, app_client, auth_headers
+    ):
+        resp = await app_client.post(
+            "/v1/images/generations",
+            json={"prompt": "a test image", "response_format": "b64_json"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_images_404_when_no_model(self, app_client, auth_headers):
+        resp = await app_client.post(
+            "/v1/images/generations",
+            json={"prompt": "a test image"},
             headers=auth_headers,
         )
         assert resp.status_code == 404

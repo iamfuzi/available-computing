@@ -3,6 +3,31 @@ import { channelsApi } from '../api/client'
 import type { Channel } from '../api/client'
 import AddChannelModal from '../components/AddChannelModal'
 
+const CHANNEL_STATUS: Record<string, { label: string; dot: string; badge: string }> = {
+  active: { label: '凭证正常', dot: 'bg-green-500', badge: 'bg-green-50 text-green-700' },
+  key_invalid: { label: 'Key 无效', dot: 'bg-red-500', badge: 'bg-red-50 text-red-700' },
+  key_expired: { label: 'Key 已过期', dot: 'bg-red-500', badge: 'bg-red-50 text-red-700' },
+  suspended: { label: '账户异常', dot: 'bg-amber-500', badge: 'bg-amber-50 text-amber-700' },
+  unconfigured: { label: '未配置', dot: 'bg-gray-300', badge: 'bg-gray-100 text-gray-600' },
+}
+
+type ComplianceSnapshot = {
+  risk: 'low' | 'medium' | 'high' | 'unknown'
+  note: string
+  reviewed_at?: string
+  sources?: string[]
+}
+
+function parseCompliance(raw: string): ComplianceSnapshot {
+  try {
+    const value = JSON.parse(raw)
+    if (value && typeof value.note === 'string') return value
+  } catch {
+    // Historical/manual notes may be plain text.
+  }
+  return { risk: 'unknown', note: raw || '未完成合规审核' }
+}
+
 export default function Channels() {
   const [channels, setChannels] = useState<Channel[]>([])
   const [showAddModal, setShowAddModal] = useState(false)
@@ -126,7 +151,10 @@ export default function Channels() {
         </div>
       ) : (
         <div className="space-y-3">
-          {channels.map((ch) => (
+          {channels.map((ch) => {
+            const status = CHANNEL_STATUS[ch.status] || CHANNEL_STATUS.unconfigured
+            const compliance = parseCompliance(ch.compliance_note)
+            return (
             <div
               key={ch.id}
               className={`bg-white border rounded-xl p-4 space-y-3 transition-opacity ${
@@ -135,10 +163,13 @@ export default function Channels() {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
-                  <span className={`w-2 h-2 rounded-full ${ch.enabled ? 'bg-green-500' : 'bg-gray-300'}`} />
+                  <span className={`w-2 h-2 rounded-full ${ch.enabled ? status.dot : 'bg-gray-300'}`} />
                   <span className="font-semibold text-gray-900">{ch.name}</span>
                   <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
                     {ch.provider_type}
+                  </span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${status.badge}`} title={ch.status_reason || status.label}>
+                    {status.label}
                   </span>
                 </div>
                 {ch.free_model_count > 0 ? (
@@ -159,6 +190,19 @@ export default function Channels() {
                     ? `探测于 ${new Date(ch.last_probed_at).toLocaleString()}`
                     : '尚未探测'}
                 </span>
+              </div>
+
+              <div className={`text-xs border rounded-lg px-3 py-2 ${
+                compliance.risk === 'high'
+                  ? 'bg-red-50 border-red-100 text-red-700'
+                  : compliance.risk === 'medium'
+                    ? 'bg-amber-50 border-amber-100 text-amber-700'
+                    : 'bg-gray-50 border-gray-100 text-gray-500'
+              }`}>
+                <span className="font-medium mr-2">
+                  合规风险：{compliance.risk === 'high' ? '高' : compliance.risk === 'medium' ? '中' : compliance.risk === 'low' ? '低' : '待确认'}
+                </span>
+                {compliance.note}
               </div>
 
               <div className="flex gap-2 pt-1 border-t border-gray-50">
@@ -193,7 +237,8 @@ export default function Channels() {
                 </button>
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

@@ -17,13 +17,7 @@ def whitelist_yaml(tmp_path):
                 "free_models": [
                     {"id": "Qwen/Qwen2.5-7B-Instruct", "free_type": "permanent"},
                     {"id": "deepseek-ai/DeepSeek-V2.5", "free_type": "quota", "rate_limit": {"rpm": 10}},
-                ],
-            },
-            "gemini": {
-                "free_models": [
-                    {"id": "gemini-2.5-flash", "free_type": "permanent", "category": "text"},
-                    {"id": "gemini-2.5-pro", "free_type": "permanent", "rate_limit": {"rpd": 50}},
-                    {"id": "gemini-3-pro-preview", "free_type": "permanent", "param_size": 600},
+                    {"id": "Qwen/Qwen3-72B-Instruct", "free_type": "permanent", "category": "text", "param_size": 72},
                 ],
             },
         },
@@ -60,10 +54,10 @@ class TestMatch:
         assert entry.free_type == "permanent"
 
     def test_suffix_match(self, wl):
-        """Model IDs like 'models/gemini-2.5-flash' should match."""
-        entry = wl.match("gemini", "models/gemini-2.5-flash")
+        """Model IDs like 'models/Qwen/Qwen2.5-7B-Instruct' should match."""
+        entry = wl.match("siliconflow", "models/Qwen/Qwen2.5-7B-Instruct")
         assert entry is not None
-        assert entry.model_id == "gemini-2.5-flash"
+        assert entry.model_id == "Qwen/Qwen2.5-7B-Instruct"
 
     def test_no_match(self, wl):
         assert wl.match("siliconflow", "nonexistent-model") is None
@@ -76,17 +70,17 @@ class TestMatch:
         assert entry.rate_limit == {"rpm": 10}
 
     def test_category_preserved(self, wl):
-        entry = wl.match("gemini", "gemini-2.5-flash")
+        entry = wl.match("siliconflow", "Qwen/Qwen3-72B-Instruct")
         assert entry.category == "text"
 
     def test_param_size_preserved(self, wl):
         # Closed-source ids with no parseable marker get param_size from the
         # whitelist — this is the fallback for the auto:smart router.
-        entry = wl.match("gemini", "gemini-3-pro-preview")
-        assert entry.param_size == 600
+        entry = wl.match("siliconflow", "Qwen/Qwen3-72B-Instruct")
+        assert entry.param_size == 72
 
     def test_param_size_defaults_none(self, wl):
-        entry = wl.match("gemini", "gemini-2.5-flash")
+        entry = wl.match("siliconflow", "Qwen/Qwen2.5-7B-Instruct")
         assert entry.param_size is None
 
 

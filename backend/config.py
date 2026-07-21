@@ -12,6 +12,11 @@ WHITELIST_PATH = Path(os.environ.get(
     str(Path(__file__).parent.parent / "whitelist" / "providers.yaml"),
 ))
 
+PROVIDERS_PATH = Path(os.environ.get(
+    "PROVIDERS_PATH",
+    str(Path(__file__).parent.parent / "providers"),
+))
+
 _jwt_secret_file = os.environ.get("JWT_SECRET_FILE")
 if _jwt_secret_file and Path(_jwt_secret_file).exists():
     JWT_SECRET = Path(_jwt_secret_file).read_text().strip()
@@ -32,11 +37,26 @@ SLOW_RESPONSE_THRESHOLD_MS = int(os.environ.get("SLOW_THRESHOLD_MS", "1000"))
 # providers like OpenRouter have very small daily budgets and a burst of
 # simultaneous probes reliably returns 429 for every model.
 PROBE_INTERVAL_BETWEEN_MODELS_SEC = float(os.environ.get("PROBE_INTERVAL_BETWEEN_MODELS_SEC", "2"))
+PROBE_GLOBAL_CONCURRENCY = int(os.environ.get("PROBE_GLOBAL_CONCURRENCY", "5"))
 
-# Passive billing-failure downgrade: consecutive 401/403 (auth/billing) failures
-# after which a free-flagged model is moved out of the free pool. A successful
-# call resets the counter to 0.
-BILLING_FAILURE_THRESHOLD = int(os.environ.get("BILLING_FAILURE_THRESHOLD", "3"))
+# Heartbeats are only for models that have seen no real traffic for several
+# days. Unknown or very small provider quotas are left untouched; baseline and
+# event-triggered checks have separate budgets because they answer a concrete
+# state change rather than continuously polling.
+HEARTBEAT_IDLE_DAYS = int(os.environ.get("HEARTBEAT_IDLE_DAYS", "3"))
+HEARTBEAT_MIN_PROVIDER_RPD = int(os.environ.get("HEARTBEAT_MIN_PROVIDER_RPD", "100"))
+HEARTBEAT_BUDGET_RATIO = float(os.environ.get("HEARTBEAT_BUDGET_RATIO", "0.01"))
+HEARTBEAT_REAL_TRAFFIC_RESERVE_RATIO = float(
+    os.environ.get("HEARTBEAT_REAL_TRAFFIC_RESERVE_RATIO", "0.90")
+)
+
+# Event-triggered rechecks use one correlated check_run_id. Three independent
+# failures inside the window are required before a free-policy change is
+# persisted. The initial check is scheduled promptly but outside request I/O.
+EVENT_RECHECK_MAX_ATTEMPTS = int(os.environ.get("EVENT_RECHECK_MAX_ATTEMPTS", "3"))
+EVENT_RECHECK_WINDOW_MINUTES = int(os.environ.get("EVENT_RECHECK_WINDOW_MINUTES", "30"))
+EVENT_RECHECK_INITIAL_DELAY_SECONDS = int(os.environ.get("EVENT_RECHECK_INITIAL_DELAY_SECONDS", "5"))
+EVENT_RECHECK_RETRY_DELAY_SECONDS = int(os.environ.get("EVENT_RECHECK_RETRY_DELAY_SECONDS", "300"))
 
 # Local proxy rate limits. API-key scoped limits are the primary guard for
 # third-party integrations; IP fallback is intentionally looser so shared NATs

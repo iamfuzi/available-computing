@@ -3,7 +3,7 @@
 > 版本：v0.1
 > 日期：2026-05-05
 > 完成日期：Completed 2026-05-06
-> 目标：V0.1 MVP，支持 Groq / SiliconFlow / Gemini，1-2 周完成
+> 目标：V0.1 MVP，支持 Groq / SiliconFlow / 智谱 GLM，1-2 周完成
 > 关联文档：[03-architecture.md](./03-architecture.md)
 
 ---
@@ -12,7 +12,7 @@
 
 ```
 第 1 天   项目脚手架 + 数据库 + 基础 API
-第 2 天   Adapter 实现（Groq / SiliconFlow / Gemini）
+第 2 天   Adapter 实现（Groq / SiliconFlow / 智谱 GLM）
 第 3 天   免费判定逻辑 + 白名单
 第 4 天   前端基础框架 + 算力池列表页
 第 5 天   厂商管理页 + 添加流程（含 WS 推送）
@@ -54,8 +54,6 @@
   - `health_check`：POST /openai/v1/chat/completions，`{"messages":[{"role":"user","content":"hi"}],"max_tokens":1}`
 - [x] **T3.4** 实现 `adapters/siliconflow.py`
   - `detect_free_from_api`：检查模型对象中的 `pricing` 或 `tags` 字段
-- [x] **T3.5** 实现 `adapters/gemini.py`
-  - 注意：Gemini API 不完全兼容 OpenAI 格式，需单独处理 `list_models` 接口
 
 ---
 
@@ -64,7 +62,7 @@
 - [x] **T4.1** 创建 `whitelist/providers.yaml`，录入初始数据：
   - Groq：`free_strategy: all`
   - SiliconFlow：已知免费模型列表（含 `free_type`）
-  - Gemini：`gemini-2.0-flash` / `gemini-1.5-flash`（含速率限制）
+  - 智谱 GLM：`glm-4-flash`（含速率限制）
 - [x] **T4.2** 实现 `services/whitelist.py`：
   - 加载 YAML
   - `is_provider_all_free(provider_id)`
@@ -131,7 +129,7 @@
 - [x] 筛选栏（类型 / 健康状态 / 搜索框）
 - [x] 模型表格（厂商、模型名、类型、上下文、状态、响应时间、操作菜单 `⋯`）
 - [x] 默认按响应时间升序
-- [x] **空状态**：无厂商时显示引导卡片（Groq / SiliconFlow / Gemini 快速入口）
+- [x] **空状态**：无厂商时显示引导卡片（Groq / SiliconFlow / 智谱 GLM 快速入口）
 - [x] `⋯` 菜单：复制 Endpoint / 复制调用示例 / 刷新该模型
 
 ### T10.2 厂商管理页（`/channels`）
@@ -140,7 +138,7 @@
 - [x] 每张卡片操作：刷新 / 编辑 / 禁用 / 删除
 
 ### T10.3 添加厂商弹窗
-- [x] Step 1：厂商选择（支持 Groq / SiliconFlow / Gemini）
+- [x] Step 1：厂商选择（支持 Groq / SiliconFlow / 智谱 GLM）
 - [x] Step 2：填写 Key + Base URL（可选）+ 直链获取 Key 的帮助链接
 - [x] 点击「验证并添加」→ 仅做 Key 验证（同步），成功后关闭弹窗
 - [x] 弹窗关闭后，厂商卡片立即出现并显示「探测中...」，探测完成后通过 WS 更新
@@ -176,7 +174,7 @@
 
 按 PRD §8 逐条验收：
 
-- [x] 用户可在 Web 界面添加 Groq / SiliconFlow / Gemini 的 Key
+- [x] 用户可在 Web 界面添加 Groq / SiliconFlow / 智谱 GLM 的 Key
 - [x] 添加后系统自动探测并展示该厂商的免费模型
 - [x] Dashboard 顶部能看到「当前可用免费模型数」统计卡片
 - [x] 模型列表能正确显示厂商、模型名、类型、状态
@@ -203,10 +201,9 @@
 - [x] **T14.2** 模型路由：通过 model_id 查找 → 找到对应 channel → 解密 key → 转发请求
 - [x] **T14.3** 流式（SSE）支持，基于 httpx AsyncClient + StreamingResponse
 - [x] **T14.4** 非流式支持
-- [x] **T14.5** Gemini 响应格式转换为 OpenAI 格式
-- [x] **T14.6** 被动健康记录：每次真实调用自动记录
-- [x] **T14.7** 在 main.py 中挂载到 `/v1` 前缀
-- [x] **T14.8** 测试通过：Gemini、OpenRouter（minimax、gemma-4）均正常工作
+- [x] **T14.5** 被动健康记录：每次真实调用自动记录
+- [x] **T14.6** 在 main.py 中挂载到 `/v1` 前缀
+- [x] **T14.7** 测试通过：OpenRouter（minimax 等）均正常工作
 
 ---
 
@@ -248,16 +245,6 @@
 - [x] **T18.2** 支持 `JWT_SECRET_FILE` 用于 Docker Secrets
 - [x] **T18.3** docker-compose.yml 使用命名卷 + 双 secrets 配置
 - [x] **T18.4** 完整端到端测试：构建 → 部署 → 添加厂商 → 代理调用
-
----
-
-## T19 — Gemini Whitelist Update
-
-- [x] **T19.1** 移除 gemini-2.0-flash 和 gemini-2.0-flash-lite（Google 已下线）
-- [x] **T19.2** 新增 gemini-2.5-flash、gemini-2.5-pro、gemini-2.5-flash-lite
-- [x] **T19.3** 新增 gemini-3-flash-preview、gemini-3-pro-preview、gemini-3.1-flash-lite-preview
-- [x] **T19.4** 新增 gemma-4-26b-a4b-it、gemma-4-31b-it
-- [x] **T19.5** 使用真实 API 验证通过
 
 ---
 

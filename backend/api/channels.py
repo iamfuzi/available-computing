@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import threading
+import json
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from sqlmodel import Session, select
@@ -9,6 +11,7 @@ from pydantic import BaseModel
 from database import get_session
 from models import Channel, Model
 from adapters import get_adapter, list_providers
+from adapters.declarative import DeclarativeAdapter
 from services.crypto import encrypt, decrypt, generate_salt
 from services.discovery import discover_channel
 from api.auth import verify_token
@@ -44,7 +47,7 @@ def _decrypt_key(enc: str, session: Session) -> str:
 class ChannelCreate(BaseModel):
     provider_type: str
     name: Optional[str] = None
-    api_key: str
+    api_key: str = ""
     base_url: Optional[str] = None
 
 
@@ -65,6 +68,7 @@ def list_channels(session: Session = Depends(get_session), _=Depends(verify_toke
     channels = session.exec(select(Channel)).all()
     result = []
     for ch in channels:
+        decrypted_key = _decrypt_key(ch.api_key_enc, session)
         free_count = session.exec(
             select(Model)
             .where(Model.channel_id == ch.id)
@@ -73,7 +77,11 @@ def list_channels(session: Session = Depends(get_session), _=Depends(verify_toke
         ).all()
         result.append({
             **ch.model_dump(),
-            "api_key_hint": "••••" + _decrypt_key(ch.api_key_enc, session)[-4:],
+            "api_key_hint": (
+                "••••" + decrypted_key[-4:]
+                if decrypted_key
+                else "无需 Key"
+            ),
             "free_model_count": len(free_count),
         })
     return result
@@ -92,6 +100,13 @@ async def create_channel(
     except ValueError:
         raise HTTPException(400, detail=f"Unknown provider: {body.provider_type}")
 
+    anonymous_allowed = (
+        isinstance(adapter, DeclarativeAdapter)
+        and adapter.config.auth.type == "none"
+    )
+    if not body.api_key and not anonymous_allowed:
+        raise HTTPException(400, detail="API key is required for this provider")
+
     base_url = body.base_url or adapter.default_base_url
 
     # Synchronous key validation
@@ -106,6 +121,15 @@ async def create_channel(
         name=body.name or adapter.display_name,
         api_key_enc=enc_key,
         base_url=body.base_url,
+        config_type="declarative" if isinstance(adapter, DeclarativeAdapter) else "custom_adapter",
+        discovery_source="manual",
+        compliance_note=json.dumps(
+            next(
+                (item.get("compliance", {}) for item in list_providers() if item["id"] == body.provider_type),
+                {},
+            ),
+            ensure_ascii=False,
+        ),
     )
     session.add(channel)
     session.commit()
@@ -114,11 +138,14 @@ async def create_channel(
     # Async discovery — don't block the response
     background_tasks.add_task(discover_channel, channel.id)
 
-    return {**channel.model_dump(), "api_key_hint": "••••" + body.api_key[-4:]}
+    return {
+        **channel.model_dump(),
+        "api_key_hint": "••••" + body.api_key[-4:] if body.api_key else "无需 Key",
+    }
 
 
 @router.patch("/{channel_id}")
-def update_channel(
+async def update_channel(
     channel_id: str,
     body: ChannelUpdate,
     session: Session = Depends(get_session),
@@ -135,8 +162,15 @@ def update_channel(
         ch.enabled = body.enabled
     if body.api_key is not None:
         ch.api_key_enc = _encrypt_key(body.api_key, session)
+        ch.status = "active"
+        ch.status_reason = None
+        ch.status_changed_at = datetime.now(timezone.utc)
+        from services.notifications import sync_channel_notification
+        sync_channel_notification(session, ch)
     session.add(ch)
     session.commit()
+    from services.notifications import broadcast_notifications_updated
+    await broadcast_notifications_updated()
     return ch
 
 
@@ -165,5 +199,5 @@ async def probe_channel(
     if not ch:
         raise HTTPException(404)
     decrypted = _decrypt_key(ch.api_key_enc, session)
-    background_tasks.add_task(discover_channel, channel_id, decrypted)
+    background_tasks.add_task(discover_channel, channel_id, decrypted, "manual", False)
     return {"status": "probing"}

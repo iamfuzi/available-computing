@@ -23,7 +23,13 @@ def _determine_free(model: ModelInfo, provider_id: str, adapter, free_id_set: se
     # Step 0: authoritative API-fetched free set (highest priority)
     if free_id_set is not None:
         if model.model_id in free_id_set:
-            return {"is_free": True, "free_type": "permanent", "free_source": "api_free_set"}
+            # SiliconFlow's charging_type=free filter cannot distinguish
+            # permanently-free models from limited-time promotions ("限免"),
+            # and the API exposes no field to tell them apart. Tag them as
+            # "quota" so they degrade faster when a promotion ends, instead
+            # of lingering as permanent-free.
+            free_type = "quota" if provider_id == "siliconflow" else "permanent"
+            return {"is_free": True, "free_type": free_type, "free_source": "api_free_set"}
         return {"is_free": False, "free_type": "permanent", "free_source": "api_free_set"}
 
     # Step 1: whole-provider free flag
@@ -60,7 +66,12 @@ def _determine_free(model: ModelInfo, provider_id: str, adapter, free_id_set: se
     return {"is_free": None, "free_type": "unknown", "free_source": "unknown"}
 
 
-async def discover_channel(channel_id: str, decrypted_key: str | None = None):
+async def discover_channel(
+    channel_id: str,
+    decrypted_key: str | None = None,
+    probe_method: str = "active_baseline",
+    probe_only_unverified: bool = True,
+):
     with Session(engine) as session:
         channel = session.get(Channel, channel_id)
         if not channel:
@@ -101,7 +112,7 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
 
             # Parameter count for auto:smart routing: parse from the id, with
             # the whitelist's param_size as a fallback for closed-source ids
-            # (glm / gemini / gpt / claude) that carry no numeric marker.
+            # (glm / gpt / claude) that carry no numeric marker.
             param_size = parse_param_size(raw.model_id)
             if param_size is None and wl_entry and wl_entry.param_size:
                 param_size = wl_entry.param_size
@@ -163,7 +174,11 @@ async def discover_channel(channel_id: str, decrypted_key: str | None = None):
 
     # Health-probe newly discovered models so status isn't "unknown"
     from services.health import probe_channel_models
-    await probe_channel_models(channel_id)
+    await probe_channel_models(
+        channel_id,
+        verification_method=probe_method,
+        only_unverified=probe_only_unverified,
+    )
 
 
 async def discover_all_channels(get_key_fn=None):

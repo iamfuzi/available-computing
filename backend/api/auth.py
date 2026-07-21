@@ -38,7 +38,13 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(bearer)) ->
 def verify_token_or_apikey(
     credentials: HTTPAuthorizationCredentials = Depends(bearer),
     session: Session = Depends(get_session),
-) -> bool:
+):
+    """Authenticate a proxy caller and return its ApiKey policy when present.
+
+    Admin JWT calls return ``None`` and retain unrestricted local-admin
+    behaviour. ``ac_`` calls return the persisted ApiKey so proxy endpoints can
+    enforce key-scoped routing and quota policy after authentication.
+    """
     token = credentials.credentials
     if token.startswith("ac_"):
         from models import ApiKey
@@ -52,11 +58,11 @@ def verify_token_or_apikey(
                 api_key.last_used_at = datetime.utcnow()
                 session.add(api_key)
                 session.commit()
-            return True
+            return api_key
         raise HTTPException(status_code=401, detail="Invalid or inactive API key")
     try:
         jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return True
+        return None
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 

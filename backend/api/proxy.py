@@ -4,15 +4,16 @@ import time
 import httpx
 import hashlib
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlmodel import Session, select
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional
+from typing import Literal, Optional
 
 from database import get_session
-from models import Model, Channel, HealthRecord
+from models import Model, Channel, HealthRecord, ApiKey
 from api.auth import verify_token_or_apikey
 from api.channels import _decrypt_key
 from services.health import (
@@ -23,6 +24,7 @@ from services.health import (
     record_rate_limit,
     clear_rate_limit,
 )
+from services.event_recheck import trigger_event_recheck
 from adapters import get_adapter
 from config import (
     PROXY_RATE_WINDOW_SECONDS,
@@ -88,7 +90,12 @@ def _check_ip_fallback_rate_limit(ip: str):
     _proxy_requests.setdefault(scope, []).append(now)
 
 
-def _check_proxy_rate_limit(ip: str, route: str = "*", auth_header: str | None = None):
+def _check_proxy_rate_limit(
+    ip: str,
+    route: str = "*",
+    auth_header: str | None = None,
+    api_key: ApiKey | None = None,
+):
     now = time.time()
     subject, limit = _rate_subject(ip, auth_header)
     scope = f"{subject}:route:{route}"
@@ -102,6 +109,31 @@ def _check_proxy_rate_limit(ip: str, route: str = "*", auth_header: str | None =
     # that different third-party API keys behind one NAT are not coupled.
     if auth_header is not None:
         _check_ip_fallback_rate_limit(ip)
+    if api_key is not None:
+        _check_api_key_policy_rate_limit(api_key)
+
+
+def _check_api_key_policy_rate_limit(api_key: ApiKey):
+    """Enforce a key's aggregate RPM/RPD across every proxy route."""
+    if not api_key.rate_limit_rpm and not api_key.rate_limit_rpd:
+        return
+    now = time.time()
+    scope = f"apikey-policy:{api_key.id}"
+    day_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    attempts = [stamp for stamp in _proxy_requests.get(scope, []) if stamp >= day_start]
+    if api_key.rate_limit_rpm:
+        recent = sum(1 for stamp in attempts if now - stamp < 60)
+        if recent >= api_key.rate_limit_rpm:
+            raise ProxyRateLimitExceeded(60, f"{scope}:rpm")
+    if api_key.rate_limit_rpd and len(attempts) >= api_key.rate_limit_rpd:
+        raise ProxyRateLimitExceeded(
+            max(1, int(day_start + 86400 - now)),
+            f"{scope}:rpd",
+        )
+    attempts.append(now)
+    _proxy_requests[scope] = attempts
 
 
 def _model_slot_key(channel: Channel, model: Model) -> str:
@@ -131,6 +163,14 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class RoutingPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exclude: list[str] = Field(default_factory=list, max_length=50)
+    min_context: Optional[int] = Field(default=None, ge=1)
+    prefer: Optional[Literal["latency", "capability"]] = None
+    fallback_chain: list[str] = Field(default_factory=list, max_length=10)
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     model: str = Field(
@@ -151,6 +191,7 @@ class ChatRequest(BaseModel):
     stop: Optional[list[str]] = None
     frequency_penalty: Optional[float] = None
     presence_penalty: Optional[float] = None
+    routing_policy: Optional[RoutingPolicy] = None
 
 
 class EmbeddingRequest(BaseModel):
@@ -188,8 +229,94 @@ class RerankRequest(BaseModel):
     return_documents: Optional[bool] = None
 
 
+class ImageGenerationRequest(BaseModel):
+    """OpenAI-compatible image generation request for free image models."""
+
+    model_config = ConfigDict(extra="ignore")
+    model: str = Field(
+        default="auto:image",
+        description="A concrete image model id or auto:image",
+    )
+    prompt: str = Field(..., min_length=1, max_length=5000)
+    n: Literal[1] = 1
+    quality: Optional[Literal["standard", "hd"]] = None
+    size: Optional[str] = Field(default=None, pattern=r"^\d+x\d+$")
+    response_format: Literal["url"] = "url"
+    user: Optional[str] = Field(default=None, min_length=6, max_length=128)
+    watermark_enabled: Optional[bool] = None
+    routing_policy: Optional[RoutingPolicy] = None
+
+
 class SelfTestRequest(BaseModel):
     model: str = "auto:text"
+    routing_policy: Optional[RoutingPolicy] = None
+
+
+@dataclass(frozen=True)
+class EffectiveRoutingPolicy:
+    provider_whitelist: frozenset[str]
+    provider_blacklist: frozenset[str]
+    min_context: int | None
+    prefer: str
+    fallback_chain: tuple[str, ...]
+
+
+def _parse_provider_ids(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    try:
+        values = json.loads(raw)
+    except (TypeError, ValueError):
+        return set()
+    return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+
+def _effective_routing_policy(
+    api_key: ApiKey | None,
+    request_policy: RoutingPolicy | None = None,
+) -> EffectiveRoutingPolicy:
+    whitelist = _parse_provider_ids(api_key.provider_whitelist) if api_key else set()
+    blacklist = _parse_provider_ids(api_key.provider_blacklist) if api_key else set()
+    key_min_context = api_key.default_min_context if api_key else None
+    request_min_context = request_policy.min_context if request_policy else None
+    minimums = [value for value in (key_min_context, request_min_context) if value is not None]
+    if request_policy:
+        blacklist.update(request_policy.exclude)
+    return EffectiveRoutingPolicy(
+        provider_whitelist=frozenset(whitelist),
+        provider_blacklist=frozenset(blacklist),
+        min_context=max(minimums) if minimums else None,
+        prefer=(request_policy.prefer if request_policy and request_policy.prefer else None)
+        or (api_key.default_prefer if api_key else "latency"),
+        fallback_chain=tuple(request_policy.fallback_chain if request_policy else ()),
+    )
+
+
+def _apply_routing_policy(
+    candidates: list[Model],
+    policy: EffectiveRoutingPolicy,
+    session: Session,
+    *,
+    preserve_smart_order: bool = False,
+) -> list[Model]:
+    allowed: list[Model] = []
+    for model in candidates:
+        channel = session.get(Channel, model.channel_id)
+        if not channel:
+            continue
+        provider = channel.provider_type
+        if policy.provider_whitelist and provider not in policy.provider_whitelist:
+            continue
+        if provider in policy.provider_blacklist:
+            continue
+        if policy.min_context is not None and (
+            model.context_length is None or model.context_length < policy.min_context
+        ):
+            continue
+        allowed.append(model)
+    if policy.prefer == "capability" and not preserve_smart_order:
+        allowed.sort(key=lambda model: _route_score_key(model, session, smart=True))
+    return allowed
 
 
 def _health_sort_key(model: Model) -> tuple:
@@ -278,14 +405,35 @@ def _route_score_key(model: Model, session: Session, smart: bool = False) -> tup
     return (priority, success_penalty, size, ms, model.model_id)
 
 
+def _channel_route_eligible(channel: Channel | None) -> bool:
+    if not channel or not channel.enabled or channel.status != "active":
+        return False
+    if channel.key_expires_at:
+        expires_at = channel.key_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            return False
+    return True
+
+
 def _try_bind_model(model: Model, session: Session):
     """Try to bind a model to its channel, adapter, and decrypted key."""
     channel = session.get(Channel, model.channel_id)
-    if not channel or not channel.enabled:
+    if not _channel_route_eligible(channel):
         return None
     adapter = get_adapter(channel.provider_type)
     key = _decrypt_key(channel.api_key_enc, session)
     return channel, adapter, key
+
+
+def _upstream_headers(adapter, key: str) -> dict[str, str]:
+    """Build proxy headers without assuming every provider needs a key."""
+    return {
+        **adapter.request_headers(key),
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/iamfuzi/available-computing",
+    }
 
 
 # Suffix tokens that mark a chat-tuning variant, not a different model family.
@@ -490,26 +638,58 @@ def _resolve_model(model_id: str, session: Session):
     return _resolve_from_candidates(model_id, _chat_candidates(session), session)
 
 
-def _category_candidates(session: Session, category: str):
-    """All active, free, healthy models of a given category (e.g. embedding, rerank).
+def _category_candidates(
+    session: Session,
+    category: str,
+    policy: EffectiveRoutingPolicy | None = None,
+):
+    """All active, free, routable models of a category (e.g. image, embedding).
 
     Unlike ``_chat_candidates`` this does NOT exclude the non-chat categories —
-    it scopes to exactly one — so the embedding/rerank routers can resolve models.
+    it scopes to exactly one. Successful generation probes commonly exceed the
+    fast-response threshold, so both healthy and slow models remain routable.
     """
     rows = session.exec(
         select(Model)
         .where(Model.is_active == True)
         .where(Model.is_free == True)
-        .where(Model.health_status == "healthy")
+        .where(Model.health_status.in_(["healthy", "slow"]))
         .where(Model.category == category)
     ).all()
-    return [m for m in rows if not _is_cooling_down(m)]
+    candidates = [m for m in rows if not _is_cooling_down(m)]
+    if policy:
+        candidates = _apply_routing_policy(candidates, policy, session)
+    return candidates
 
 
-def _resolve_category_model(model_id: str, category: str, session: Session):
+def _resolve_category_model(
+    model_id: str,
+    category: str,
+    session: Session,
+    policy: EffectiveRoutingPolicy | None = None,
+):
     """Resolve a model within a single category (embedding/rerank) using the
     same tolerant matching as the chat router."""
-    return _resolve_from_candidates(model_id, _category_candidates(session, category), session)
+    return _resolve_from_candidates(
+        model_id,
+        _category_candidates(session, category, policy),
+        session,
+    )
+
+
+def _resolve_auto_category_model(
+    category: str,
+    session: Session,
+    policy: EffectiveRoutingPolicy | None = None,
+):
+    """Select and bind the best routable model in a non-chat category."""
+    candidates = _category_candidates(session, category, policy)
+    candidates.sort(key=lambda model: _route_score_key(model, session))
+    for model in candidates:
+        bound = _try_bind_model(model, session)
+        if bound:
+            return model, bound[0], bound[1], bound[2]
+    return None, None, None, None
 
 
 def _resolve_auto_model(category: str, session: Session):
@@ -538,6 +718,9 @@ def _auto_candidate_models(kind: str, session: Session) -> list[Model]:
     text_candidates = [m for m in chat_candidates if _is_generic_text_candidate(m)]
     generic_candidates = text_candidates or chat_candidates
     if kind == "smart":
+        # auto:smart = "give me the most capable model". Keep deterministic
+        # param_size ordering within each tier — the user explicitly asked for
+        # the biggest, so randomizing would violate that intent.
         candidates = generic_candidates
         candidates.sort(key=lambda m: _route_score_key(m, session, smart=True))
         return candidates
@@ -550,18 +733,30 @@ def _auto_candidate_models(kind: str, session: Session) -> list[Model]:
     return candidates
 
 
-def _request_candidate_models(model_id: str, session: Session) -> tuple[list[Model], str | None]:
+def _single_route_candidates(
+    model_id: str,
+    session: Session,
+    policy: EffectiveRoutingPolicy,
+) -> tuple[list[Model], str | None]:
     auto_match = _AUTO_RE.match(model_id)
     if auto_match:
         kind = auto_match.group(1)
         candidates = _auto_candidate_models(kind, session)
+        candidates = _apply_routing_policy(
+            candidates,
+            policy,
+            session,
+            preserve_smart_order=kind == "smart",
+        )
         if not candidates:
             return [], f"No verified available models for {model_id}"
         return candidates, None
 
-    candidates = _matching_models(model_id, _chat_candidates(session), session)
+    pool = _apply_routing_policy(_chat_candidates(session), policy, session)
+    candidates = _matching_models(model_id, pool, session)
+    candidates = _apply_routing_policy(candidates, policy, session)
     if not candidates:
-        suggestions = _suggest_models(model_id, _chat_candidates(session))
+        suggestions = _suggest_models(model_id, pool)
         hint = (
             f" Did you mean: {', '.join(suggestions)}?"
             if suggestions
@@ -569,6 +764,32 @@ def _request_candidate_models(model_id: str, session: Session) -> tuple[list[Mod
         )
         return [], f"Model '{model_id}' not found or not currently available.{hint}"
     return candidates, None
+
+
+def _request_candidate_models(
+    model_id: str,
+    session: Session,
+    policy: EffectiveRoutingPolicy | None = None,
+) -> tuple[list[Model], str | None]:
+    """Resolve the requested route plus its ordered, policy-safe fallbacks."""
+    policy = policy or _effective_routing_policy(None)
+    routes = [model_id, *policy.fallback_chain]
+    candidates: list[Model] = []
+    seen: set[str] = set()
+    first_error: str | None = None
+    for route in routes:
+        route_candidates, error = _single_route_candidates(route, session, policy)
+        if first_error is None and error:
+            first_error = error
+        for candidate in route_candidates:
+            if candidate.id not in seen:
+                seen.add(candidate.id)
+                candidates.append(candidate)
+    if candidates:
+        return candidates, None
+    if policy.provider_whitelist or policy.provider_blacklist or policy.min_context:
+        return [], "No verified available models satisfy the effective routing policy"
+    return [], first_error or f"No verified available models for {model_id}"
 
 
 def _resolve_smart_model(session: Session):
@@ -655,6 +876,8 @@ def _diagnostic_headers(
     selected_provider: str | None = None,
     attempted_models: list[str] | None = None,
     retry_after: int | None = None,
+    selected_verified_at: datetime | None = None,
+    fallback_triggered: bool | None = None,
 ) -> dict[str, str]:
     headers: dict[str, str] = {}
     if route:
@@ -663,6 +886,14 @@ def _diagnostic_headers(
         headers["X-AC-Selected-Model"] = selected_model
     if selected_provider:
         headers["X-AC-Selected-Provider"] = selected_provider
+    if selected_model and selected_provider:
+        headers["X-AC-Actual-Model"] = f"{selected_provider}/{selected_model}"
+    if selected_model:
+        if fallback_triggered is None:
+            fallback_triggered = bool(attempted_models and len(attempted_models) > 1)
+        headers["X-AC-Fallback-Triggered"] = str(fallback_triggered).lower()
+    if selected_verified_at:
+        headers["X-AC-Model-Verified-At"] = selected_verified_at.isoformat()
     if attempted_models is not None:
         headers["X-AC-Attempted-Models"] = ",".join(attempted_models)
         headers["X-AC-Fallback-Count"] = str(max(0, len(attempted_models) - 1))
@@ -724,12 +955,16 @@ def _make_openai_error(
 
 
 def _model_route_eligible(model: Model, session: Session) -> bool:
+    channel = session.get(Channel, model.channel_id)
     return (
         model.is_active is True
         and model.is_free is True
-        and model.health_status == "healthy"
+        # slow models are still callable (just >1s latency); the chat router
+        # already treats them as candidates, so eligibility must match.
+        and model.health_status in ("healthy", "slow")
         and not _is_cooling_down(model)
         and _is_pool_eligible(model, session)
+        and _channel_route_eligible(channel)
     )
 
 
@@ -750,10 +985,15 @@ def _ac_model_info(model: Model, channel: Channel | None, session: Session) -> d
         "last_response_ms": model.last_response_ms,
         "last_checked_at": model.last_checked_at,
         "last_success_at": model.last_success_at,
+        "last_verified_at": model.last_verified_at,
+        "verification_method": model.verification_method,
+        "staleness_threshold_days": model.staleness_threshold_days,
         "rate_limited_until": model.rate_limited_until,
+        "channel_status": channel.status if channel else None,
         "last_429_at": model.last_429_at,
         "consecutive_429": model.consecutive_429,
         "param_size": model.param_size,
+        "context_length": model.context_length,
     }
 
 
@@ -762,13 +1002,14 @@ def ac_models(
     category: Optional[str] = None,
     include_unavailable: bool = True,
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
     """Available Computing model diagnostics for third-party clients."""
     stmt = select(Model).where(Model.is_active == True).where(Model.is_free == True)
     if category:
         stmt = stmt.where(Model.category == category)
     models = session.exec(stmt).all()
+    models = _apply_routing_policy(models, _effective_routing_policy(auth), session)
     channels = {ch.id: ch for ch in session.exec(select(Channel)).all()}
 
     rows = [_ac_model_info(m, channels.get(m.channel_id), session) for m in models]
@@ -781,7 +1022,7 @@ def ac_models(
 @router.get("/ac/status")
 def ac_status(
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
     """Machine-readable pool and route status for third-party integrations."""
     models = session.exec(
@@ -789,6 +1030,8 @@ def ac_status(
         .where(Model.is_active == True)
         .where(Model.is_free == True)
     ).all()
+    policy = _effective_routing_policy(auth)
+    models = _apply_routing_policy(models, policy, session)
 
     distribution = {"available": 0, "rate_limited": 0, "degraded": 0, "unverified": 0, "unavailable": 0}
     for m in models:
@@ -805,11 +1048,15 @@ def ac_status(
 
     def route_info(route: str, category: str | None = None) -> dict:
         if route == "auto:smart":
-            candidates = _auto_candidate_models("smart", session)
+            candidates = _apply_routing_policy(
+                _auto_candidate_models("smart", session), policy, session, preserve_smart_order=True
+            )
         elif route == "auto:fast":
-            candidates = _auto_candidate_models("fast", session)
+            candidates = _apply_routing_policy(_auto_candidate_models("fast", session), policy, session)
         else:
-            candidates = _auto_candidate_models(category or "text", session)
+            candidates = _apply_routing_policy(
+                _auto_candidate_models(category or "text", session), policy, session
+            )
         return {
             "available": len(candidates) > 0,
             "candidate_count": len(candidates),
@@ -836,11 +1083,12 @@ def ac_status(
 def ac_self_test(
     body: SelfTestRequest | None = None,
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
     """Non-consuming integration self-test for third-party clients."""
     route = (body.model if body else "auto:text")
-    candidates, error = _request_candidate_models(route, session)
+    policy = _effective_routing_policy(auth, body.routing_policy if body else None)
+    candidates, error = _request_candidate_models(route, session, policy)
     if error:
         return {
             "ok": False,
@@ -889,7 +1137,7 @@ def ac_self_test(
 def list_openai_models(
     category: Optional[str] = None,
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
     """OpenAI-compatible model listing.
 
@@ -910,10 +1158,14 @@ def list_openai_models(
         .where(Model.is_free == True)
         .where(Model.health_status.in_(["healthy", "slow"]))
     ).all()
+    models = _apply_routing_policy(models, _effective_routing_policy(auth), session)
+    channels = {ch.id: ch for ch in session.exec(select(Channel)).all()}
 
     data = []
     for m in models:
         if _is_cooling_down(m):
+            continue
+        if not _channel_route_eligible(channels.get(m.channel_id)):
             continue
         if category == "all":
             pass
@@ -929,6 +1181,17 @@ def list_openai_models(
             "created": 0,
             "owned_by": "available-computing",
             "param_size": m.param_size,
+            "x_ac_metadata": {
+                "context_length": m.context_length,
+                "health_status": m.health_status,
+                "health_score": round(_recent_success_rate(m, session), 3),
+                "latency_p50_ms": m.last_response_ms,
+                "last_verified_at": m.last_verified_at,
+                "verification_method": m.verification_method,
+                "staleness_threshold_days": m.staleness_threshold_days,
+                "free_type": m.free_type,
+                "modalities": ["text", "image"] if m.category == "vision" else [m.category or "text"],
+            },
         })
     return {"object": "list", "data": data}
 
@@ -938,7 +1201,7 @@ async def chat_completions(
     request: Request,
     body: ChatRequest,
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
     """OpenAI-compatible chat completion.
 
@@ -949,7 +1212,12 @@ async def chat_completions(
     """
     ip = request.client.host if request.client else "unknown"
     try:
-        _check_proxy_rate_limit(ip, body.model, request.headers.get("Authorization"))
+        _check_proxy_rate_limit(
+            ip,
+            body.model,
+            request.headers.get("Authorization"),
+            auth,
+        )
     except ProxyRateLimitExceeded as exc:
         return _make_ac_error(
             429,
@@ -960,7 +1228,8 @@ async def chat_completions(
             route=body.model,
         )
 
-    candidate_models, error = _request_candidate_models(body.model, session)
+    policy = _effective_routing_policy(auth, body.routing_policy)
+    candidate_models, error = _request_candidate_models(body.model, session, policy)
     if error:
         code = "no_available_models" if _AUTO_RE.match(body.model) else "model_not_found"
         return _make_ac_error(
@@ -973,6 +1242,8 @@ async def chat_completions(
         )
 
     attempted: list[str] = []
+    primary_candidates, _ = _single_route_candidates(body.model, session, policy)
+    primary_candidate_ids = {candidate.id for candidate in primary_candidates}
     max_attempts = min(_MAX_UPSTREAM_ATTEMPTS, len(candidate_models))
     original_model = body.model
     last_rate_retry_after: int | None = None
@@ -982,7 +1253,7 @@ async def chat_completions(
     budget_retry_after: int | None = None
     failed_channels: set[str] = set()
 
-    for model in candidate_models[:max_attempts]:
+    for candidate_index, model in enumerate(candidate_models[:max_attempts]):
         if model.channel_id in failed_channels:
             continue
         binding = _try_bind_model(model, session)
@@ -1003,35 +1274,9 @@ async def chat_completions(
         body.model = model.model_id
         payload = _build_openai_payload(body)
 
-        if channel.provider_type == "gemini":
-            try:
-                response = (
-                    await _proxy_gemini_stream(model, channel, adapter, key, payload, session, slot_key=slot_key)
-                    if body.stream
-                    else await _proxy_gemini(model, channel, adapter, key, payload, session)
-                )
-            finally:
-                if not body.stream:
-                    _release_model_slot(slot_key)
-            if getattr(response, "status_code", None) == 429:
-                last_rate_retry_after = getattr(response, "_retry_after_seconds", None)
-                last_upstream_status = 429
-                continue
-            return _attach_diagnostic_headers(
-                response,
-                route=original_model,
-                selected_model=model.model_id,
-                selected_provider=channel.provider_type,
-                attempted_models=attempted,
-            )
-
         base_url = channel.base_url or adapter.default_base_url
         url = f"{base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/iamfuzi/available-computing",
-        }
+        headers = _upstream_headers(adapter, key)
 
         start = time.monotonic()
         if body.stream:
@@ -1059,6 +1304,12 @@ async def chat_completions(
                             selected_model=model.model_id,
                             selected_provider=channel.provider_type,
                             attempted_models=attempted,
+                            selected_verified_at=model.last_verified_at,
+                            fallback_triggered=(
+                                model.id not in primary_candidate_ids
+                                or candidate_index > 0
+                                or len(attempted) > 1
+                            ),
                         ),
                     },
                 )
@@ -1069,15 +1320,19 @@ async def chat_completions(
             ms = int((time.monotonic() - start) * 1000)
             if response.status_code == 429:
                 last_rate_retry_after = record_rate_limit(model.id, _parse_retry_after(response.headers), session, ms)
+                trigger_event_recheck(model.id, "rate_limited")
                 last_upstream_status = 429
                 continue
             if response.status_code >= 500:
                 await record_passive_health(model.id, ms, "server_error", channel.id, key)
-            if response.status_code in (401, 403):
+            if response.status_code in (401, 402, 403):
                 record_billing_failure(model.id, response.status_code, session)
+                trigger_event_recheck(model.id, f"upstream_{response.status_code}")
                 error_text = error_body.decode(errors="ignore") if isinstance(error_body, bytes) else str(error_body)
-                if _is_channel_billing_failure(channel, response.status_code, error_text):
+                if response.status_code in (401, 403) and _is_channel_billing_failure(channel, response.status_code, error_text):
                     record_channel_billing_failure(channel.id, response.status_code, session)
+                    from services.notifications import broadcast_notifications_updated
+                    await broadcast_notifications_updated()
                 failed_channels.add(channel.id)
             last_upstream_status = response.status_code
             continue
@@ -1107,18 +1362,28 @@ async def chat_completions(
                     selected_model=model.model_id,
                     selected_provider=channel.provider_type,
                     attempted_models=attempted,
+                    selected_verified_at=model.last_verified_at,
+                    fallback_triggered=(
+                        model.id not in primary_candidate_ids
+                        or candidate_index > 0
+                        or len(attempted) > 1
+                    ),
                 ),
             )
         if r.status_code == 429:
             last_rate_retry_after = record_rate_limit(model.id, _parse_retry_after(r.headers), session, ms)
+            trigger_event_recheck(model.id, "rate_limited")
             last_upstream_status = 429
             continue
         if r.status_code >= 500:
             await record_passive_health(model.id, ms, "server_error", channel.id, key)
-        if r.status_code in (401, 403):
+        if r.status_code in (401, 402, 403):
             record_billing_failure(model.id, r.status_code, session)
-            if _is_channel_billing_failure(channel, r.status_code, r.text):
+            trigger_event_recheck(model.id, f"upstream_{r.status_code}")
+            if r.status_code in (401, 403) and _is_channel_billing_failure(channel, r.status_code, r.text):
                 record_channel_billing_failure(channel.id, r.status_code, session)
+                from services.notifications import broadcast_notifications_updated
+                await broadcast_notifications_updated()
                 failed_channels.add(channel.id)
         last_upstream_status = r.status_code
         continue
@@ -1169,7 +1434,16 @@ async def chat_completions(
     )
 
 
-async def _proxy_passthrough(model, channel, adapter, key, path_suffix: str, payload: dict, session: Session):
+async def _proxy_passthrough(
+    model,
+    channel,
+    adapter,
+    key,
+    path_suffix: str,
+    payload: dict,
+    session: Session,
+    requested_route: str | None = None,
+):
     """Forward a non-chat request to ``{base_url}/<path_suffix>`` and return the
     upstream response verbatim. Used by /v1/embeddings and /v1/rerank.
 
@@ -1177,15 +1451,33 @@ async def _proxy_passthrough(model, channel, adapter, key, path_suffix: str, pay
     401/403 → billing-failure count, success → passive healthy record).
     """
     base_url = channel.base_url or adapter.default_base_url
+    route = requested_route or model.model_id
     url = f"{base_url}/{path_suffix}"
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/iamfuzi/available-computing",
-    }
+    headers = _upstream_headers(adapter, key)
     start = time.monotonic()
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.post(url, json=payload, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(url, json=payload, headers=headers)
+    except httpx.TimeoutException:
+        await record_passive_health(model.id, 120000, "timeout", channel.id, key)
+        return _make_ac_error(
+            504,
+            "Upstream request timed out",
+            "upstream_error",
+            "upstream_timeout",
+            attempted_models=[model.model_id],
+            route=route,
+        )
+    except httpx.RequestError:
+        await record_passive_health(model.id, 0, "network_error", channel.id, key)
+        return _make_ac_error(
+            503,
+            "Upstream network request failed",
+            "upstream_error",
+            "upstream_network_error",
+            attempted_models=[model.model_id],
+            route=route,
+        )
     ms = int((time.monotonic() - start) * 1000)
 
     if r.status_code == 200:
@@ -1196,16 +1488,19 @@ async def _proxy_passthrough(model, channel, adapter, key, path_suffix: str, pay
             content=r.json(),
             status_code=200,
             headers=_diagnostic_headers(
-                route=model.model_id,
+                route=route,
                 selected_model=model.model_id,
                 selected_provider=channel.provider_type,
                 attempted_models=[model.model_id],
+                selected_verified_at=model.last_verified_at,
+                fallback_triggered=False,
             ),
         )
     # See chat router: 429 cools the model down; 401/403 counts toward
     # billing-failure eviction.
     if r.status_code == 429:
         retry_after = record_rate_limit(model.id, _parse_retry_after(r.headers), session, ms)
+        trigger_event_recheck(model.id, "rate_limited")
         return _make_ac_error(
             429,
             "Upstream rate limited",
@@ -1213,12 +1508,13 @@ async def _proxy_passthrough(model, channel, adapter, key, path_suffix: str, pay
             "model_rate_limited",
             retry_after=retry_after,
             attempted_models=[model.model_id],
-            route=model.model_id,
+            route=route,
         )
     if r.status_code >= 500:
         await record_passive_health(model.id, ms, "server_error", channel.id, key)
-    if r.status_code in (401, 403):
+    if r.status_code in (401, 402, 403):
         record_billing_failure(model.id, r.status_code, session)
+        trigger_event_recheck(model.id, f"upstream_{r.status_code}")
     code = "upstream_auth_failed" if r.status_code in (401, 403) else "upstream_server_error" if r.status_code >= 500 else "upstream_error"
     return _make_ac_error(
         r.status_code,
@@ -1226,7 +1522,7 @@ async def _proxy_passthrough(model, channel, adapter, key, path_suffix: str, pay
         "upstream_error",
         code,
         attempted_models=[model.model_id],
-        route=model.model_id,
+        route=route,
     )
 
 
@@ -1241,21 +1537,27 @@ def _build_simple_payload(body, *, include: list[str]):
     return payload
 
 
-@router.post("/embeddings")
-async def embeddings(
+@router.post("/images/generations")
+async def image_generations(
     request: Request,
-    body: EmbeddingRequest,
+    body: ImageGenerationRequest,
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
-    """OpenAI-compatible embeddings.
+    """Generate one image through an available free image model.
 
-    Resolves ``model`` against the embedding candidate pool (concrete id only,
-    no auto-routing) and forwards to the upstream ``/embeddings`` endpoint.
+    The request and response follow OpenAI's URL response shape. ``auto:image``
+    selects the best currently verified image model; a concrete image model id
+    may also be supplied.
     """
     ip = request.client.host if request.client else "unknown"
     try:
-        _check_proxy_rate_limit(ip, f"embeddings:{body.model}", request.headers.get("Authorization"))
+        _check_proxy_rate_limit(
+            ip,
+            f"images:{body.model}",
+            request.headers.get("Authorization"),
+            auth,
+        )
     except ProxyRateLimitExceeded as exc:
         return _make_ac_error(
             429,
@@ -1265,7 +1567,99 @@ async def embeddings(
             retry_after=exc.retry_after,
             route=body.model,
         )
-    resolved = _resolve_category_model(body.model, "embedding", session)
+
+    policy = _effective_routing_policy(auth, body.routing_policy)
+    if body.model == "auto:image":
+        resolved = _resolve_auto_category_model("image", session, policy)
+    else:
+        resolved = _resolve_category_model(body.model, "image", session, policy)
+    model, channel, adapter, key = resolved
+    if not model:
+        return _make_ac_error(
+            404,
+            f"No available image model matching '{body.model}'",
+            "invalid_request_error",
+            "model_not_found",
+            param="model",
+            route=body.model,
+        )
+    try:
+        _check_model_budget(model, session)
+    except ModelBudgetExceeded as exc:
+        return _make_ac_error(
+            429,
+            "Model is locally rate limited before upstream call",
+            "rate_limit_error",
+            "local_model_budget_exceeded",
+            retry_after=exc.retry_after,
+            attempted_models=[model.model_id],
+            route=body.model,
+        )
+    slot_key, acquired = await _try_acquire_model_slot(channel, model)
+    if not acquired:
+        return _make_ac_error(
+            503,
+            "All candidate models are currently busy",
+            "service_unavailable",
+            "all_candidates_busy",
+            attempted_models=[model.model_id],
+            route=body.model,
+        )
+
+    payload = {"model": model.model_id, "prompt": body.prompt}
+    for field in ("quality", "size", "watermark_enabled"):
+        value = getattr(body, field)
+        if value is not None:
+            payload[field] = value
+    if body.user is not None:
+        payload["user_id"] = body.user
+    try:
+        return await _proxy_passthrough(
+            model,
+            channel,
+            adapter,
+            key,
+            "images/generations",
+            payload,
+            session,
+            requested_route=body.model,
+        )
+    finally:
+        _release_model_slot(slot_key)
+
+
+@router.post("/embeddings")
+async def embeddings(
+    request: Request,
+    body: EmbeddingRequest,
+    session: Session = Depends(get_session),
+    auth=Depends(verify_token_or_apikey),
+):
+    """OpenAI-compatible embeddings.
+
+    Resolves ``model`` against the embedding candidate pool (concrete id only,
+    no auto-routing) and forwards to the upstream ``/embeddings`` endpoint.
+    """
+    ip = request.client.host if request.client else "unknown"
+    try:
+        _check_proxy_rate_limit(
+            ip,
+            f"embeddings:{body.model}",
+            request.headers.get("Authorization"),
+            auth,
+        )
+    except ProxyRateLimitExceeded as exc:
+        return _make_ac_error(
+            429,
+            "Local proxy rate limit exceeded",
+            "rate_limit_error",
+            "local_rate_limited",
+            retry_after=exc.retry_after,
+            route=body.model,
+        )
+    resolved = _resolve_category_model(
+        body.model, "embedding", session, _effective_routing_policy(auth)
+    )
     model, channel, adapter, key = resolved
     if not model:
         return _make_ac_error(
@@ -1310,7 +1704,7 @@ async def rerank(
     request: Request,
     body: RerankRequest,
     session: Session = Depends(get_session),
-    _=Depends(verify_token_or_apikey),
+    auth=Depends(verify_token_or_apikey),
 ):
     """Rerank documents by relevance to a query (SiliconFlow-compatible).
 
@@ -1320,7 +1714,12 @@ async def rerank(
     """
     ip = request.client.host if request.client else "unknown"
     try:
-        _check_proxy_rate_limit(ip, f"rerank:{body.model}", request.headers.get("Authorization"))
+        _check_proxy_rate_limit(
+            ip,
+            f"rerank:{body.model}",
+            request.headers.get("Authorization"),
+            auth,
+        )
     except ProxyRateLimitExceeded as exc:
         return _make_ac_error(
             429,
@@ -1330,7 +1729,9 @@ async def rerank(
             retry_after=exc.retry_after,
             route=body.model,
         )
-    resolved = _resolve_category_model(body.model, "rerank", session)
+    resolved = _resolve_category_model(
+        body.model, "rerank", session, _effective_routing_policy(auth)
+    )
     model, channel, adapter, key = resolved
     if not model:
         return _make_ac_error(
@@ -1368,172 +1769,3 @@ async def rerank(
         return await _proxy_passthrough(model, channel, adapter, key, "rerank", payload, session)
     finally:
         _release_model_slot(slot_key)
-
-
-async def _proxy_gemini(model, channel, adapter, key, payload, session):
-    """Gemini uses :generateContent endpoint with different format."""
-    base_url = channel.base_url or "https://generativelanguage.googleapis.com/v1beta"
-    gemini_url = f"{base_url}/models/{model.model_id}:generateContent"
-
-    # Convert OpenAI messages to Gemini format
-    system_instruction = None
-    contents = []
-    for msg in payload.get("messages", []):
-        role = msg["role"]
-        if role == "system":
-            system_instruction = msg["content"]
-        else:
-            contents.append({"role": "user" if role == "user" else "model", "parts": [{"text": msg["content"]}]})
-
-    gemini_payload: dict = {"contents": contents}
-    if system_instruction:
-        gemini_payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-
-    gen_config: dict = {}
-    if payload.get("max_tokens"):
-        gen_config["maxOutputTokens"] = payload["max_tokens"]
-    if payload.get("temperature") is not None:
-        gen_config["temperature"] = payload["temperature"]
-    if gen_config:
-        gemini_payload["generationConfig"] = gen_config
-
-    start = time.monotonic()
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.post(gemini_url, params={"key": key}, json=gemini_payload)
-    ms = int((time.monotonic() - start) * 1000)
-
-    if r.status_code == 200:
-        await record_passive_health(model.id, ms, None, channel.id, key)
-        clear_billing_failures(model.id, session)
-        clear_rate_limit(model.id, session)
-        # Convert Gemini response to OpenAI format
-        gemini_resp = r.json()
-        text = ""
-        for cand in gemini_resp.get("candidates", []):
-            for part in cand.get("content", {}).get("parts", []):
-                text += part.get("text", "")
-        openai_resp = {
-            "id": f"chatcmpl-{model.id[:8]}",
-            "object": "chat.completion",
-            "model": model.model_id,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }
-        return JSONResponse(content=openai_resp, status_code=200)
-    else:
-        if r.status_code == 429:
-            retry_after = record_rate_limit(model.id, _parse_retry_after(r.headers), session, ms)
-            response = JSONResponse(
-                status_code=429,
-                content={
-                    "error": {
-                        "message": "Upstream rate limited",
-                        "type": "rate_limit_error",
-                        "code": "model_rate_limited",
-                        "retry_after": retry_after,
-                    }
-                },
-            )
-            response._retry_after_seconds = retry_after
-            return response
-        # Only 5xx means the upstream is actually unhealthy; 4xx/429 are caller-side.
-        if r.status_code >= 500:
-            await record_passive_health(model.id, ms, "server_error", channel.id, key)
-        if r.status_code in (401, 403):
-            record_billing_failure(model.id, r.status_code, session)
-        return JSONResponse(
-            status_code=r.status_code,
-            content={"error": {"message": f"Upstream returned {r.status_code}", "type": "upstream_error"}},
-        )
-
-
-async def _proxy_gemini_stream(model, channel, adapter, key, payload, session, slot_key: str | None = None):
-    """Stream Gemini responses in OpenAI SSE format using non-streaming generateContent."""
-    base_url = channel.base_url or "https://generativelanguage.googleapis.com/v1beta"
-
-    system_instruction = None
-    contents = []
-    for msg in payload.get("messages", []):
-        role = msg["role"]
-        if role == "system":
-            system_instruction = msg["content"]
-        else:
-            contents.append({"role": "user" if role == "user" else "model", "parts": [{"text": msg["content"]}]})
-
-    gemini_payload: dict = {"contents": contents}
-    if system_instruction:
-        gemini_payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-
-    gen_config: dict = {}
-    if payload.get("max_tokens"):
-        gen_config["maxOutputTokens"] = payload["max_tokens"]
-    if payload.get("temperature") is not None:
-        gen_config["temperature"] = payload["temperature"]
-    if gen_config:
-        gemini_payload["generationConfig"] = gen_config
-
-    gemini_url = f"{base_url}/models/{model.model_id}:generateContent"
-    chunk_id = f"chatcmpl-{model.id[:8]}"
-    start = time.monotonic()
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.post(gemini_url, params={"key": key}, json=gemini_payload)
-
-    ms = int((time.monotonic() - start) * 1000)
-
-    if r.status_code != 200:
-        if r.status_code == 429:
-            retry_after = record_rate_limit(model.id, _parse_retry_after(r.headers), session, ms)
-            _release_model_slot(slot_key)
-            response = JSONResponse(
-                status_code=429,
-                content={
-                    "error": {
-                        "message": "Upstream rate limited",
-                        "type": "rate_limit_error",
-                        "code": "model_rate_limited",
-                        "retry_after": retry_after,
-                    }
-                },
-            )
-            response._retry_after_seconds = retry_after
-            return response
-        # Only 5xx means the upstream is actually unhealthy; 4xx/429 are caller-side.
-        if r.status_code >= 500:
-            await record_passive_health(model.id, ms, "server_error", channel.id, key)
-        if r.status_code in (401, 403):
-            record_billing_failure(model.id, r.status_code, session)
-        _release_model_slot(slot_key)
-
-        async def error_gen():
-            yield f"data: {json.dumps({'error': {'message': f'Upstream returned {r.status_code}', 'type': 'upstream_error'}})}\n\n"
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(error_gen(), media_type="text/event-stream")
-
-    await record_passive_health(model.id, ms, None, channel.id, key)
-    clear_billing_failures(model.id, session)
-    clear_rate_limit(model.id, session)
-
-    text = ""
-    for cand in r.json().get("candidates", []):
-        for part in cand.get("content", {}).get("parts", []):
-            text += part.get("text", "")
-
-    async def generate():
-        try:
-            if text:
-                sse = {
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "model": model.model_id,
-                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(sse)}\n\n"
-                sse["choices"][0]["delta"] = {"content": text}
-                yield f"data: {json.dumps(sse)}\n\n"
-            yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'model': model.model_id, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-            yield "data: [DONE]\n\n"
-        finally:
-            _release_model_slot(slot_key)
-
-    return StreamingResponse(generate(), media_type="text/event-stream")

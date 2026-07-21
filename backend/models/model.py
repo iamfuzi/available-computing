@@ -22,6 +22,12 @@ class Model(SQLModel, table=True):
     last_checked_at: Optional[datetime] = None
     last_real_call_at: Optional[datetime] = None
     last_success_at: Optional[datetime] = None
+    # A verification is a successful real inference request. Catalog discovery
+    # and failed probes update last_checked_at, but must not make data look fresh.
+    last_verified_at: Optional[datetime] = Field(default=None, index=True)
+    verification_method: Optional[str] = None  # passive / active_* / manual
+    staleness_threshold_days: int = Field(default=7)
+    free_expires_at: Optional[datetime] = None
     rate_limited_until: Optional[datetime] = None
     last_429_at: Optional[datetime] = None
     consecutive_429: int = Field(default=0)

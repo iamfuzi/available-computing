@@ -41,7 +41,7 @@ class WhitelistManager:
         provider = self._data.get("providers", {}).get(provider_id, {})
         for entry in provider.get("free_models", []):
             entry_id = entry.get("id", "")
-            # Exact match or suffix match (e.g. "gemini-2.0-flash" matches "models/gemini-2.0-flash")
+            # Exact match or suffix match (e.g. "glm-4-flash" matches "models/glm-4-flash")
             if model_id == entry_id or model_id.endswith("/" + entry_id) or model_id.endswith(entry_id):
                 return WhitelistEntry(
                     model_id=entry_id,

@@ -143,7 +143,7 @@
 **MVP 必须支持的厂商**（首批 3 个）：
 1. **Groq** —— 免费模型最多最稳，API 标准
 2. **SiliconFlow（硅基流动）** —— 中文友好、模型丰富
-3. **Google AI Studio（Gemini）** —— 免费额度大、多模态
+3. **智谱 GLM** —— 中文友好、有免费模型
 
 **V0.5 扩展**（4-8 个）：DeepSeek、Cloudflare Workers AI、智谱 GLM、月之暗面、阿里百炼
 
@@ -173,7 +173,7 @@
 | 类型 | 说明 | 风险 |
 |------|------|------|
 | **永久免费** | 无 Token 上限，长期可用（如 Groq） | 低 |
-| **免费配额** | 有每日/每月 Token 上限，超出后收费（如 Gemini 1500 RPD） | 中——超额会静默收费 |
+| **免费配额** | 有每日/每月 Token 上限，超出后收费 | 中——超额会静默收费 |
 | **新用户赠送** | 注册赠送一次性额度，用完即止 | 高——用完自动转付费 |
 
 产品必须在 UI 中区分这三种类型，避免用户因误用"免费配额"型模型而产生意外账单。
@@ -186,10 +186,9 @@ siliconflow:
   free_models:
     - Qwen/Qwen2.5-7B-Instruct
     - deepseek-ai/DeepSeek-V2.5
-google:
+zhipu:
   free_models:
-    - gemini-2.0-flash
-    - gemini-1.5-flash
+    - glm-4-flash
     rate_limit: 15/min
 ```
 
@@ -225,7 +224,7 @@ google:
 #### F3.3 模型列表空状态
 当用户尚未添加任何厂商时，列表区域显示空状态引导：
 - 居中展示提示文案："还没有接入任何厂商"
-- 展示 3 个推荐厂商的快速入口卡片（Groq / SiliconFlow / Gemini），点击直接进入添加流程
+- 展示 3 个推荐厂商的快速入口卡片（Groq / SiliconFlow / 智谱 GLM），点击直接进入添加流程
 - 副文案说明预期效果："添加后系统自动探测免费模型，通常 1 分钟内完成"
 
 #### F3.4 模型详情页
@@ -302,7 +301,7 @@ google:
 - ✅ F1 厂商配置（手动添加 Key）
 - ✅ F2.1 / F2.2 / F2.3 免费模型发现（白名单 + API 标识）
 - ✅ F3 基础 Dashboard（总览 + 模型列表）
-- ✅ 支持 3 个厂商：Groq、SiliconFlow、Gemini
+- ✅ 支持 3 个厂商：Groq、SiliconFlow、智谱 GLM
 
 **不包含：**
 - ❌ F4 健康探测
@@ -351,7 +350,7 @@ google:
 
 满足以下条件即视为 MVP 完成：
 
-1. ✅ 用户可在 Web 界面添加 Groq / SiliconFlow / Gemini 三个厂商的 Key
+1. ✅ 用户可在 Web 界面添加 Groq / SiliconFlow / 智谱 GLM 三个厂商的 Key
 2. ✅ 添加后系统自动探测并展示该厂商的免费模型
 3. ✅ Dashboard 顶部能看到"当前可用免费模型数"统计卡片
 4. ✅ 模型列表能正确显示厂商、模型名、类型、状态

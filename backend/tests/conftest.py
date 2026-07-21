@@ -60,9 +60,11 @@ def _reset_rate_limiters():
     """Clear in-memory rate limiters between tests."""
     from api.auth import _login_attempts
     from api.proxy import _proxy_requests, _model_semaphores
+    from services.event_recheck import _pending_rechecks
     _login_attempts.clear()
     _proxy_requests.clear()
     _model_semaphores.clear()
+    _pending_rechecks.clear()
     yield
 
 

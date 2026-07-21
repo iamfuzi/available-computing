@@ -70,7 +70,7 @@ client = OpenAI(
 
 # 调用指定模型
 response = client.chat.completions.create(
-    model="gemini-2.5-flash",
+    model="glm-4-flash",
     messages=[{"role": "user", "content": "你好"}],
     stream=True
 )
@@ -122,7 +122,6 @@ curl http://localhost:8080/v1/chat/completions \
 - **实时限流采集** —— 从 API 响应头自动获取限流数据，无需手动维护
 - **被动优先探测** —— 利用真实调用结果更新状态，主动探测仅配额保护触发
 - **OpenAI 兼容** —— 完整支持 `/v1/models` 和 `/v1/chat/completions`，流式/非流式
-- **Gemini 流式支持** —— 自动转换 Gemini 协议为 OpenAI SSE 格式
 
 ## 支持的厂商
 
@@ -130,28 +129,50 @@ curl http://localhost:8080/v1/chat/completions \
 |------|---------|------|
 | Groq | 全部 | 永久免费，极速推理 |
 | 硅基流动（SiliconFlow） | 20+ | 文本 + 嵌入 + 重排 + 图像 + 视频生成 |
-| Google Gemini | 9 | 免费配额，Flash 系列可用 |
 | OpenRouter | 29+ | 聚合平台，自动检测免费模型 |
 | Agnes AI | 1 | agnes-2.0-flash 文本+图像理解免费，512K 上下文 |
 | 智谱AI（ZhiPu） | 9 | Flash 系列永久免费，含图像/视频生成 |
+| Mistral AI | 1（已验证） | Free mode，无需信用卡，额度较低 |
+| Kilo Gateway | 动态发现 | 匿名调用 `:free` 模型，无需 API Key；免费目录变化时自动同步 |
 
-新增厂商只需实现一个 Adapter 文件，见 [`backend/adapters/`](./backend/adapters/)。
+标准 OpenAI 兼容厂商可通过 [`providers/`](./providers/) 声明式接入；特殊接口使用 [`backend/adapters/`](./backend/adapters/) 自定义适配器。
 
 ## 开发
+
+推荐从仓库根目录一键启动。脚本会同时启动后端 `8002` 和前端 `5173`，并在退出时关闭两者：
+
+```bash
+./scripts/dev.sh
+# 打开 http://localhost:5173/
+```
+
+首次运行前仍需安装依赖：
 
 ```bash
 # 后端（Python 3.11+）
 cd backend
 pip install -r requirements.txt
-export JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-export ADMIN_PASSWORD=dev
-uvicorn main:app --reload --port 8000
 
 # 前端（Node 22+）
 cd frontend
 npm install
-npm run dev    # Vite dev server，自动代理 /api → :8000
 ```
+
+本地开发使用 `http://localhost:5173/`；Docker 单容器部署使用 `http://localhost:8080/`。
+
+## 备份与恢复检查
+
+运行中的 SQLite 数据库必须使用 SQLite 在线备份，不能直接复制 WAL 模式下的单个 `db.sqlite`：
+
+```bash
+# 创建权限为 600 的一致性备份；命令会输出备份路径
+./scripts/backup.sh
+
+# 在隔离临时目录中升级迁移并校验完整性，不修改生产数据库
+./scripts/check-backup.sh backend/data/backups/available-computing-YYYYMMDD-HHMMSS.db
+```
+
+`backend/data/`、`secrets/` 和 `.env` 均被 Git 忽略。API Key 只在创建时展示一次，不要粘贴到代码、提交记录或聊天中。
 
 ## 技术栈
 
@@ -167,7 +188,7 @@ npm run dev    # Vite dev server，自动代理 /api → :8000
 
 ```
 backend/
-  adapters/     # 厂商适配器（Groq / SiliconFlow / Gemini / OpenRouter / ZhiPu / Agnes）
+  adapters/     # 厂商适配器（Groq / SiliconFlow / OpenRouter / ZhiPu / Agnes）
   api/          # REST API + OpenAI 兼容代理 + API 密钥管理
   models/       # 数据库模型（Channel / Model / ApiKey / HealthRecord）
   services/     # 核心业务（发现、探测、加密、调度、清理）
@@ -186,7 +207,7 @@ whitelist/
 
 - **V0.1 MVP** ✅ — Key 管理 + 自动发现 + 算力池 Dashboard + Docker 部署
 - **V0.5** ✅ — OpenAI 兼容代理 + API 密钥管理 + 健康感知路由 + 智能路由 + API 文档页
-- **V1.0** — 调用统计 + 额度预测告警 + 更多厂商（Cerebras、Cloudflare Workers AI）
+- **V1.0（个人版）** ✅ — 声明式厂商、三层探测、Key 级路由、Chat/Embedding/Rerank/Image、候选池与站内通知
 
 ### License
 
@@ -242,7 +263,7 @@ client = OpenAI(
 
 # Call a specific model
 client.chat.completions.create(
-    model="gemini-2.5-flash",
+    model="glm-4-flash",
     messages=[{"role": "user", "content": "Hello"}],
     stream=True
 )
@@ -269,7 +290,6 @@ client.chat.completions.create(
 - **Health-aware routing** — Exclude unhealthy models, sort by health + response speed
 - **API key management** — Independent `ac_` keys per service, with enable/disable
 - **OpenAI-compatible** — Full `/v1/models` and `/v1/chat/completions` support, streaming and non-streaming
-- **Gemini streaming** — Auto-converts Gemini protocol to OpenAI SSE format
 
 ## Supported Providers
 
@@ -277,12 +297,12 @@ client.chat.completions.create(
 |----------|-------------|-------|
 | Groq | All | Permanently free, ultra-fast inference |
 | SiliconFlow | 20+ | Text + embedding + rerank + image + video generation |
-| Google Gemini | 9 | Free quota, Flash series available |
 | OpenRouter | 29+ | Aggregator, auto-detects free models |
 | Agnes AI | 1 | agnes-2.0-flash text+image understanding free, 512K context |
 | ZhiPu (智谱AI) | 9 | Flash series permanently free, incl. image/video generation |
+| Mistral AI | 1 (verified) | Free mode, no credit card, lower limits |
 
-Adding a new provider = implement one Adapter file. See [`backend/adapters/`](./backend/adapters/).
+Standard OpenAI-compatible providers can use declarative config in [`providers/`](./providers/); special APIs use custom adapters in [`backend/adapters/`](./backend/adapters/).
 
 ## Development
 
@@ -314,7 +334,7 @@ npm run dev
 
 - **V0.1 MVP** ✅ — Key management + auto-discovery + pool dashboard + Docker deploy
 - **V0.5** ✅ — OpenAI proxy + API key management + health-aware routing + smart routing + API docs
-- **V1.0** — Call statistics + quota prediction & alerts + more providers (Cerebras, Cloudflare Workers AI)
+- **V1.0** — Call statistics + quota prediction & alerts + more no-card providers
 
 ### License
 

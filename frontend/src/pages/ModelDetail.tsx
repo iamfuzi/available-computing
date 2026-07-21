@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { modelsApi } from '../api/client'
 import type { ModelRow, HealthRecord } from '../api/client'
 import HealthBadge from '../components/HealthBadge'
+import FreshnessBadge from '../components/FreshnessBadge'
 import FreeTypeBadge from '../components/FreeTypeBadge'
 
 const TABS = ['cURL', 'Python', 'Node.js'] as const
@@ -177,12 +178,13 @@ export default function ModelDetail() {
   if (loading && !model) return <div className="p-8 text-gray-400 text-sm animate-pulse">加载中...</div>
   if (!model) return null
 
-  let rateLimit = null
-  try {
-    rateLimit = model.rate_limit ? JSON.parse(model.rate_limit) : null
-  } catch {
-    rateLimit = null
-  }
+  const rateLimit = (() => {
+    try {
+      return model.rate_limit ? JSON.parse(model.rate_limit) : null
+    } catch {
+      return null
+    }
+  })()
 
   function copyExample() {
     navigator.clipboard.writeText(buildExample(model!, tab))
@@ -212,11 +214,21 @@ export default function ModelDetail() {
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <HealthBadge status={model.health_status} responseMs={model.last_response_ms} />
+            <FreshnessBadge
+              lastVerifiedAt={model.last_verified_at}
+              thresholdDays={model.staleness_threshold_days}
+              method={model.verification_method}
+            />
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
           <FreeTypeBadge freeType={model.free_type} source={model.free_source} />
+          {model.free_expires_at && (
+            <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+              免费至 {new Date(model.free_expires_at).toLocaleDateString()}
+            </span>
+          )}
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">

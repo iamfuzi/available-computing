@@ -15,10 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/ ./
 COPY whitelist/ ./whitelist/
+COPY providers/ ./providers/
 COPY --from=frontend-builder /frontend/dist ./static
 
 ENV DATA_DIR=/app/data
 ENV WHITELIST_PATH=/app/whitelist/providers.yaml
+ENV PROVIDERS_PATH=/app/providers
 
 EXPOSE 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

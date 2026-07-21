@@ -65,8 +65,8 @@ export const settingsApi = {
 
 export const apiKeysApi = {
   list: () => api.get<ApiKeyRow[]>('/apikeys').then((r) => r.data),
-  create: (name: string) => api.post<ApiKeyCreated>('/apikeys', { name }).then((r) => r.data),
-  update: (id: string, data: { is_active?: boolean; name?: string }) =>
+  create: (data: ApiKeyCreateInput) => api.post<ApiKeyCreated>('/apikeys', data).then((r) => r.data),
+  update: (id: string, data: Partial<ApiKeyCreateInput> & { is_active?: boolean }) =>
     api.patch(`/apikeys/${id}`, data),
   delete: (id: string) => api.delete(`/apikeys/${id}`),
 }
@@ -77,6 +77,25 @@ export const acApi = {
   selfTest: (model = 'auto:text') => proxy.post<AcSelfTest>('/ac/self-test', { model }).then((r) => r.data),
 }
 
+export const candidatesApi = {
+  list: (includeConfigured = false) =>
+    api.get<CandidateProvider[]>('/candidates', { params: { include_configured: includeConfigured } }).then((r) => r.data),
+  sources: () => api.get<CandidateSourceState[]>('/candidates/sources').then((r) => r.data),
+  refresh: () => api.post<CandidateRefreshResult>('/candidates/refresh').then((r) => r.data),
+  yamlDraft: (id: string) => api.get<{ provider_id: string; yaml: string }>(`/candidates/${id}/yaml-draft`).then((r) => r.data),
+  review: (id: string, status: 'pending' | 'reviewed' | 'ignored') =>
+    api.patch<CandidateProvider>(`/candidates/${id}`, { status }).then((r) => r.data),
+}
+
+export const notificationsApi = {
+  list: (includeResolved = false) =>
+    api.get<NotificationRow[]>('/notifications', { params: { include_resolved: includeResolved } }).then((r) => r.data),
+  unreadCount: () => api.get<{ count: number }>('/notifications/unread-count').then((r) => r.data),
+  update: (id: string, status: 'read' | 'dismissed') =>
+    api.patch<NotificationRow>(`/notifications/${id}`, { status }).then((r) => r.data),
+  readAll: () => api.post<{ updated: number }>('/notifications/read-all').then((r) => r.data),
+}
+
 // Types
 export interface PoolSummary {
   total_channels: number
@@ -84,6 +103,64 @@ export interface PoolSummary {
   free_model_count: number
   available_model_count: number
   health_distribution: Record<string, number>
+  invalid_key_count: number
+  pending_candidate_count: number
+  pending_policy_change_count: number
+  recheck_count_24h: number
+  unread_notification_count: number
+}
+
+export interface NotificationRow {
+  id: string
+  dedupe_key: string
+  category: 'channel' | 'candidate' | 'policy_change' | 'candidate_source'
+  severity: 'critical' | 'warning' | 'info'
+  title: string
+  message: string
+  action_path: string | null
+  payload: Record<string, unknown>
+  status: 'unread' | 'read' | 'dismissed'
+  created_at: string
+  updated_at: string
+  read_at: string | null
+  resolved_at: string | null
+}
+
+export interface CandidateProvider {
+  provider_id: string
+  name: string
+  homepage_url: string
+  base_url: string | null
+  summary: string
+  compatibility: 'openai_compatible' | 'special_or_unknown'
+  access_type: 'unknown' | 'permanent_free' | 'recurring_free' | 'quota_limited' | 'trial_credit' | 'credit_metered' | 'card_required'
+  requires_card: boolean
+  admission_status: 'review_required' | 'excluded'
+  exclusion_reason: string | null
+  model_count: number
+  models: string[]
+  sources: string[]
+  status: 'pending' | 'reviewed' | 'ignored' | 'configured'
+  has_yaml_draft: boolean
+  first_seen_at: string
+  last_seen_at: string
+  last_changed_at: string
+}
+
+export interface CandidateSourceState {
+  source_id: string
+  url: string
+  consecutive_failures: number
+  last_attempt_at: string | null
+  last_success_at: string | null
+  last_error: string | null
+  last_candidate_count: number
+  needs_attention: boolean
+}
+
+export interface CandidateRefreshResult {
+  successes: Record<string, number>
+  failures: Record<string, string>
 }
 
 export interface Channel {
@@ -95,6 +172,13 @@ export interface Channel {
   enabled: boolean
   created_at: string
   last_probed_at: string | null
+  status: 'active' | 'key_invalid' | 'key_expired' | 'unconfigured' | 'suspended'
+  status_reason: string | null
+  status_changed_at: string
+  key_expires_at: string | null
+  config_type: 'custom_adapter' | 'declarative'
+  discovery_source: string
+  compliance_note: string
   free_model_count: number
 }
 
@@ -102,6 +186,24 @@ export interface Provider {
   id: string
   name: string
   base_url: string
+  config_type: 'custom' | 'declarative'
+  requirements?: {
+    requires_card: boolean
+    requires_phone: boolean
+    requires_realname: boolean
+  }
+  setup?: {
+    description: string
+    key_hint: string
+    console_url: string
+    key_optional?: boolean
+  }
+  compliance?: {
+    risk: 'low' | 'medium' | 'high' | 'unknown'
+    note: string
+    reviewed_at: string
+    sources: string[]
+  }
 }
 
 export interface CreateChannelInput {
@@ -128,6 +230,10 @@ export interface ModelRow {
   last_response_ms: number | null
   last_checked_at: string | null
   last_success_at: string | null
+  last_verified_at: string | null
+  verification_method: string | null
+  staleness_threshold_days: number
+  free_expires_at: string | null
   rate_limited_until: string | null
   last_429_at: string | null
   consecutive_429: number
@@ -154,6 +260,11 @@ export interface HealthRecord {
   response_ms: number | null
   error_code: string | null
   is_passive: boolean
+  verification_method: string | null
+  http_status: number | null
+  check_run_id: string | null
+  failure_reason: string | null
+  rate_limit_snapshot: string | null
 }
 
 export interface Settings {
@@ -171,9 +282,27 @@ export interface ApiKeyRow {
   is_active: boolean
   created_at: string
   last_used_at: string | null
+  provider_whitelist: string[]
+  provider_blacklist: string[]
+  rate_limit: { rpm: number | null; rpd: number | null }
+  default_routing_policy: {
+    prefer: 'latency' | 'capability'
+    min_context: number | null
+  }
 }
 
-export interface ApiKeyCreated {
+export interface ApiKeyCreateInput {
+  name: string
+  provider_whitelist?: string[]
+  provider_blacklist?: string[]
+  rate_limit?: { rpm?: number; rpd?: number }
+  default_routing_policy?: {
+    prefer: 'latency' | 'capability'
+    min_context?: number
+  }
+}
+
+export interface ApiKeyCreated extends ApiKeyRow {
   id: string
   name: string
   key: string
