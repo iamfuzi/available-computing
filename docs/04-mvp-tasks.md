@@ -3,6 +3,7 @@
 > 版本：v0.1
 > 日期：2026-05-05
 > 完成日期：Completed 2026-05-06
+> 状态：V0.1 历史任务记录；Personal V1 增量任务见本文末尾
 > 目标：V0.1 MVP，支持 Groq / SiliconFlow / 智谱 GLM，1-2 周完成
 > 关联文档：[03-architecture.md](./03-architecture.md)
 
@@ -30,7 +31,7 @@
 - [x] **T1.2** 安装核心依赖：`fastapi uvicorn sqlmodel httpx apscheduler cryptography pyyaml`
 - [x] **T1.3** 初始化 React + TypeScript + Vite 项目（`frontend/`）
 - [x] **T1.4** 安装前端依赖：`shadcn/ui tailwindcss react-router-dom`
-- [x] **T1.5** 配置 Vite dev proxy：`/api` → `localhost:8000`
+- [x] **T1.5** 配置 Vite dev proxy：`/api`、`/v1`、`/ws` → `localhost:8002`
 
 ---
 
@@ -60,7 +61,7 @@
 ## T4 — 白名单
 
 - [x] **T4.1** 创建 `whitelist/providers.yaml`，录入初始数据：
-  - Groq：`free_strategy: all`
+  - Groq：MVP 初始使用 `free_strategy: all`；Personal V1 已撤销该假设，改为审定允许列表/API 明确信号
   - SiliconFlow：已知免费模型列表（含 `free_type`）
   - 智谱 GLM：`glm-4-flash`（含速率限制）
 - [x] **T4.2** 实现 `services/whitelist.py`：
@@ -250,9 +251,25 @@
 
 ## 开放决策（开始写代码前确认）
 
+> 以下为 MVP 开始前的历史决策记录。当前系统参数与实现以 [系统架构](./03-architecture.md) 和 [部署指南](./05-deployment.md) 为准。
+
 | 问题 | 默认决策 | 备注 |
 |------|---------|------|
 | 前端静态文件 serve 方式 | FastAPI 直接 serve（单进程，无 Nginx） | 简单优先；高并发再加 Nginx |
 | 登录 Token 有效期 | 7 天，无刷新机制 | 个人工具，不需要复杂 session 管理 |
 | 数据目录 | `/app/data`，Docker volume 挂载 | |
 | 健康探测并发数 | asyncio gather，同时最多 20 个 | 避免被厂商限流 |
+
+---
+
+## Personal V1 增量任务（完成于 2026-07-21）
+
+- [x] **T19 — 严格免费准入**：候选模型只接受明确零价格、审定白名单或受控声明；排除信用卡、试用期、固定赠送额度和自动转付费服务
+- [x] **T20 — 统一代理扩展**：实现 Chat、Embedding、Rerank、Image 四类端点，支持流式响应、候选池和自动回退
+- [x] **T21 — 代理 Key 与策略**：实现创建、轮换、撤销、模型/厂商/能力范围和单 Key 速率限制
+- [x] **T22 — 三层探测体系**：入库基线、低频心跳、事件触发复核，并用真实调用的被动反馈持续更新路由状态
+- [x] **T23 — 可观测性与通知**：实现调用日志、失败诊断、状态变化记录和站内通知中心
+- [x] **T24 — 可维护接入**：支持 `providers/*.yaml` 声明式厂商、无鉴权渠道以及模型 ID 后缀规则
+- [x] **T25 — 个人部署运维**：统一开发启动脚本，提供备份及备份可恢复性检查
+
+验收结果和有意保留的范围边界见 [原方案实施进度](./08-original-plan-progress.md)。

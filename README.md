@@ -23,7 +23,7 @@
 
 - **一个 Key 调所有模型** —— 通过 API 密钥（`ac_` 开头）统一调用所有厂商的免费模型，完全兼容 OpenAI SDK
 - **自动选最好的模型** —— `model="auto:text"` 自动路由到当前最健康、最快的模型
-- **7×24 健康监控** —— 被动优先 + 主动探测，实时感知模型可用性和响应速度
+- **三层健康监控** —— 入库基线、低频心跳、事件触发复检，并用真实调用持续更新状态
 - **零运维成本** —— Docker 一行部署，SQLite 本地存储，API Key 加密存储
 
 ## 功能截图
@@ -116,24 +116,26 @@ curl http://localhost:8080/v1/chat/completions \
 ## 核心特性
 
 - **自动发现** —— 添加 API Key 后自动拉取模型列表，多源判定免费状态（白名单 + API 字段 + 厂商级标记）
-- **免费类型区分** —— 永久免费 / 免费配额（有日限额）/ 新用户赠送，防止无感超额
+- **严格免费准入** —— 默认排除绑卡、一次性赠金、固定日/月额度和限时试用；社区候选只进入人工审核池
 - **健康感知路由** —— 自动排除不可用模型，按健康状态和响应速度排序选最优
-- **API 密钥管理** —— 创建独立的 `ac_` 密钥给不同服务使用，支持启用/停用
+- **API 密钥管理** —— 独立 `ac_` Key 支持厂商白/黑名单、RPM/RPD、最小上下文和路由偏好
 - **实时限流采集** —— 从 API 响应头自动获取限流数据，无需手动维护
-- **被动优先探测** —— 利用真实调用结果更新状态，主动探测仅配额保护触发
-- **OpenAI 兼容** —— 完整支持 `/v1/models` 和 `/v1/chat/completions`，流式/非流式
+- **自动降级** —— 429 冷却、fallback chain 和请求级路由策略共同避免反复命中故障模型
+- **统一能力入口** —— 支持 `/v1/models`、Chat、Embedding、Rerank、Image 和 `/v1/ac/*` 诊断接口
 
-## 支持的厂商
+## 已实现的厂商适配
 
-| 厂商 | 免费模型 | 说明 |
-|------|---------|------|
-| Groq | 全部 | 永久免费，极速推理 |
-| 硅基流动（SiliconFlow） | 20+ | 文本 + 嵌入 + 重排 + 图像 + 视频生成 |
-| OpenRouter | 29+ | 聚合平台，自动检测免费模型 |
-| Agnes AI | 1 | agnes-2.0-flash 文本+图像理解免费，512K 上下文 |
-| 智谱AI（ZhiPu） | 9 | Flash 系列永久免费，含图像/视频生成 |
-| Mistral AI | 1（已验证） | Free mode，无需信用卡，额度较低 |
-| Kilo Gateway | 动态发现 | 匿名调用 `:free` 模型，无需 API Key；免费目录变化时自动同步 |
+| 厂商 | 接入方式 | 免费判定说明 |
+|------|---------|-------------|
+| Groq | 自定义 Adapter | 只路由当前白名单或 API 明确确认的免费模型，不再假设全目录免费 |
+| 硅基流动（SiliconFlow） | 自定义 Adapter | 以实时免费目录为最高优先级，覆盖 Chat / Embedding / Rerank |
+| OpenRouter | 自定义 Adapter | 依据目录价格字段识别当前零价格模型 |
+| Agnes AI | 自定义 Adapter | 仅路由经过审核并成功验证的免费模型 |
+| 智谱AI（ZhiPu） | 自定义 Adapter | 仅路由经过审核并成功验证的免费能力，支持 Image |
+| Mistral AI | 声明式配置 | 审核后的允许列表，不把账号目录中的其他模型视为免费 |
+| Kilo Gateway | 声明式配置 | 匿名发现 `:free` 模型和 `kilo-auto/free`，无需保存上游 Key |
+
+表格表示代码具备接入能力，不代表每个厂商都已在当前实例启用，也不承诺免费政策永久不变。新增或重新启用厂商前仍需按管理端合规记录复核官方政策。
 
 标准 OpenAI 兼容厂商可通过 [`providers/`](./providers/) 声明式接入；特殊接口使用 [`backend/adapters/`](./backend/adapters/) 自定义适配器。
 
@@ -172,7 +174,7 @@ npm install
 ./scripts/check-backup.sh backend/data/backups/available-computing-YYYYMMDD-HHMMSS.db
 ```
 
-`backend/data/`、`secrets/` 和 `.env` 均被 Git 忽略。API Key 只在创建时展示一次，不要粘贴到代码、提交记录或聊天中。
+`backend/data/`、`secrets/` 和 `.env` 均被 Git 忽略。代理 Key 可在本地管理页查看和复制，因此管理页与数据库也属于敏感资产；不要把任何 Key 粘贴到代码、提交记录、日志或聊天中。
 
 ## 技术栈
 
@@ -188,10 +190,10 @@ npm install
 
 ```
 backend/
-  adapters/     # 厂商适配器（Groq / SiliconFlow / OpenRouter / ZhiPu / Agnes）
+  adapters/     # 自定义 Adapter + 声明式通用 Adapter
   api/          # REST API + OpenAI 兼容代理 + API 密钥管理
-  models/       # 数据库模型（Channel / Model / ApiKey / HealthRecord）
-  services/     # 核心业务（发现、探测、加密、调度、清理）
+  models/       # Channel / Model / ApiKey / HealthRecord / Candidate / Notification
+  services/     # 发现、三层探测、候选池、通知、加密与调度
   ws/           # WebSocket 实时推送
 frontend/
   src/
@@ -201,7 +203,11 @@ frontend/
     hooks/      # WebSocket hook
 whitelist/
   providers.yaml # 免费模型白名单
+providers/
+  *.yaml          # 审核后的声明式厂商配置
 ```
+
+完整文档导航见 [`docs/README.md`](./docs/README.md)。
 
 ## 路线图
 
@@ -232,7 +238,7 @@ Available Computing solves all of this: **Add keys → Auto-discover → Health 
 
 - **One key for all models** — Use API keys (`ac_` prefix) to call all providers' free models, fully OpenAI SDK compatible
 - **Auto-select the best model** — `model="auto:text"` routes to the healthiest, fastest model available
-- **24/7 health monitoring** — Passive-first + active probing, real-time awareness of model availability and speed
+- **Three-layer health monitoring** — Baseline, low-frequency heartbeat, and event-triggered rechecks backed by real calls
 - **Zero ops cost** — Docker one-liner deploy, local SQLite, encrypted API key storage
 
 ## Quick Start
@@ -286,39 +292,44 @@ client.chat.completions.create(
 ## Key Features
 
 - **Auto-discovery** — Add API key, system fetches models and determines free status via whitelist + API fields
-- **Free type distinction** — Permanent free / Free quota / New user grant
+- **Strict admission policy** — Excludes card-required, one-time-credit, fixed daily/monthly quota, and time-limited trial candidates by default
 - **Health-aware routing** — Exclude unhealthy models, sort by health + response speed
-- **API key management** — Independent `ac_` keys per service, with enable/disable
-- **OpenAI-compatible** — Full `/v1/models` and `/v1/chat/completions` support, streaming and non-streaming
+- **Per-key routing policy** — Provider allow/deny lists, RPM/RPD, minimum context, and default preference
+- **Unified capability endpoints** — Models, Chat, Embedding, Rerank, Image, and `/v1/ac/*` diagnostics
 
-## Supported Providers
+## Implemented Provider Integrations
 
-| Provider | Free Models | Notes |
-|----------|-------------|-------|
-| Groq | All | Permanently free, ultra-fast inference |
-| SiliconFlow | 20+ | Text + embedding + rerank + image + video generation |
-| OpenRouter | 29+ | Aggregator, auto-detects free models |
-| Agnes AI | 1 | agnes-2.0-flash text+image understanding free, 512K context |
-| ZhiPu (智谱AI) | 9 | Flash series permanently free, incl. image/video generation |
-| Mistral AI | 1 (verified) | Free mode, no credit card, lower limits |
+| Provider | Integration | Free-model rule |
+|----------|-------------|-----------------|
+| Groq | Custom adapter | Only reviewed allowlisted or API-confirmed free models are routed |
+| SiliconFlow | Custom adapter | Live free catalog has priority; Chat / Embedding / Rerank supported |
+| OpenRouter | Custom adapter | Detects currently zero-priced models from catalog pricing |
+| Agnes AI | Custom adapter | Routes only reviewed and successfully verified free models |
+| ZhiPu (智谱AI) | Custom adapter | Routes reviewed and verified free capabilities, including Image |
+| Mistral AI | Declarative config | Uses a reviewed allowlist instead of treating the account catalog as free |
+| Kilo Gateway | Declarative config | Anonymous `:free` discovery plus `kilo-auto/free`; no upstream key stored |
+
+This table describes implemented integrations, not enabled channels or a promise that an upstream policy will remain free. Recheck the recorded compliance evidence before adding or re-enabling a provider.
 
 Standard OpenAI-compatible providers can use declarative config in [`providers/`](./providers/); special APIs use custom adapters in [`backend/adapters/`](./backend/adapters/).
 
 ## Development
 
+Install dependencies once, then start both development services from the repository root:
+
 ```bash
-# Backend (Python 3.11+)
 cd backend
 pip install -r requirements.txt
-export JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-export ADMIN_PASSWORD=dev
-uvicorn main:app --reload --port 8000
-
-# Frontend (Node 22+)
 cd frontend
 npm install
-npm run dev
+
+cd ..
+./scripts/dev.sh
+# Frontend: http://localhost:5173/
+# Backend:  http://localhost:8002/
 ```
+
+Docker remains the single-container deployment and is served at `http://localhost:8080/`.
 
 ## Tech Stack
 
@@ -330,11 +341,13 @@ npm run dev
 | Security | AES-256-GCM encrypted key storage, JWT auth, PBKDF2 key derivation |
 | Deploy | Docker multi-stage build, single container |
 
+See [`docs/README.md`](./docs/README.md) for the architecture, deployment, integration, and upgrade records.
+
 ## Roadmap
 
 - **V0.1 MVP** ✅ — Key management + auto-discovery + pool dashboard + Docker deploy
 - **V0.5** ✅ — OpenAI proxy + API key management + health-aware routing + smart routing + API docs
-- **V1.0** — Call statistics + quota prediction & alerts + more no-card providers
+- **V1.0 (personal)** ✅ — Declarative providers, three-layer probing, per-key routing, Chat/Embedding/Rerank/Image, candidate pool, and in-app notifications
 
 ### License
 

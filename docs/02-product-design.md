@@ -1,9 +1,12 @@
 # Available Computing —— 产品设计文档
 
-> 版本：v0.1 草案
+> 版本：v0.1 历史基线
 > 日期：2026-05-05
-> 状态：设计评审中
+> 状态：已归档；线框与概念设计仅供追溯
 > 关联文档：[01-PRD.md](./01-PRD.md)
+> 当前实现：[系统架构](./03-architecture.md) · [Personal V1 升级方案](./07-personal-v1-upgrade.md) · [实施进度](./08-original-plan-progress.md)
+
+> 本文中的厂商、模型、免费政策和 `V1.0+` 标记反映 2026-05-05 的设计假设，不代表当前事实。Personal V1 已实现统一代理、调用日志、代理 Key 策略、候选池、自动回退、三层探测和站内通知；免费准入以当前运行时规则为准。
 
 ---
 
@@ -76,7 +79,7 @@ Model (该 Channel 下发现的模型)
 ├─────────────────────────────────────────┤
 │  📊 算力池      （首页 / Dashboard）     │
 │  🔌 厂商管理    （Channels）            │
-│  📜 调用日志    （V1.0+）               │
+│  📜 调用日志    （Personal V1 已实现）   │
 │  ⚙️  设置       （Settings）             │
 └─────────────────────────────────────────┘
 ```
@@ -94,12 +97,12 @@ Model (该 Channel 下发现的模型)
   ├─ 添加厂商 (/channels/new)
   └─ 厂商详情 (/channels/:id)
 
-调用日志 (/logs)        [V1.0+]
+调用日志 (/logs)        [Personal V1 已实现]
 
 设置 (/settings)
   ├─ 基础设置（探测频率、阈值）
   ├─ 白名单管理
-  ├─ 调用 Key 管理（V1.0+）
+  ├─ 调用 Key 管理（Personal V1 已实现）
   └─ 关于
 ```
 
@@ -386,7 +389,7 @@ Model (该 Channel 下发现的模型)
 调用厂商 API
 ```
 
-**方式 B：通过统一接口（V1.0+）**
+**方式 B：通过统一接口（Personal V1 已实现）**
 ```
 用户配置代码中的 base_url 为 Available Computing
   ↓
@@ -415,7 +418,7 @@ Available Computing 后端：
 对一个 Model 判定 is_free:
   ↓
 [Step 1] 厂商级标记
-  ├─ 内置数据：Groq、Cloudflare 等整厂商免费 → is_free = true, source = "provider_free"
+  ├─ 官方明确声明且经人工复核的全免费策略 → is_free = true, source = "provider_free"
   └─ 否则继续
   ↓
 [Step 2] API 字段
@@ -460,8 +463,11 @@ UI 上每个被标记为「免费」的模型，必须同时展示：
 version: 2026.05.01
 providers:
   groq:
-    free_strategy: all              # 整厂商免费
-    notes: "Groq 全部模型当前免费，速率限制有差异"
+    free_strategy: whitelist
+    notes: "不假设整个目录免费，只保留当前复核通过的模型"
+    free_models:
+      - id: reviewed-model-id
+        free_type: permanent
 
   siliconflow:
     free_strategy: whitelist
@@ -623,7 +629,7 @@ docker run -d \
 │  │  API Server                     │   │
 │  │  ├─ REST API                    │   │
 │  │  ├─ WebSocket (推送状态变化)     │   │
-│  │  └─ V1.0+: OpenAI 兼容代理       │   │
+│  │  └─ OpenAI 兼容代理（已实现）     │   │
 │  └────────────┬────────────────────┘   │
 │               │                         │
 │  ┌────────────▼────────────────────┐   │
@@ -645,24 +651,22 @@ docker run -d \
 
 ---
 
-## 10. 设计中暂未决策的点
+## 10. 历史未决点与当前结论
 
-文档中保留这些开放点，待评审后定稿：
+以下问题保留用于追溯；Personal V1 的当前结论写在每项后：
 
-1. **MVP 是否要做 OpenAI 兼容代理？** 当前定位 V1.0+，但若用户呼声高可能前置
-2. **健康探测是否对用户配额敏感？** 默认 30min/次，是否应该提供更激进/更保守的预设
+1. **MVP 是否要做 OpenAI 兼容代理？** 已完成，并扩展到 Chat、Embedding、Rerank、Image。
+2. **健康探测是否对用户配额敏感？** 已采用三层探测和动态预算，未知或过小配额跳过心跳。
 3. **是否做模型「智能推荐」？** 例如根据用户最近调用习惯推荐相似免费模型——可能是 V2.0 的事
-4. **多用户/团队版** 何时考虑？目前明确不做，但需评估是否影响早期数据模型设计
-5. **白名单是否引入"过期时间"？** 比如某条目超过 30 天未更新自动转为弱信号
+4. **多用户/团队版** 何时考虑？个人版明确不做。
+5. **白名单是否引入"过期时间"？** 已通过验证新鲜度、`free_expires_at` 和事件复核表达。
 6. ~~**Dashboard 默认排序逻辑**~~ —— 已决策：默认按响应时间升序（最快模型优先）
 
 ---
 
-## 11. 下一步
+## 11. 历史步骤的完成结果
 
-1. 评审本文档与 PRD —— 确认 MVP 范围与开放问题决策
-2. 决定技术栈（Python / Go / Node）
-3. 决定是 Fork New API 还是从零实现（建议从零）
-4. 输出技术架构文档（`03-architecture.md`）
-5. 输出 MVP 任务拆解（`04-mvp-tasks.md`）
-6. 开始 MVP 开发
+1. 已确认个人自托管与严格免费准入边界。
+2. 已采用 Python/FastAPI + React/TypeScript 技术栈并从零实现。
+3. 已输出并持续同步当前架构、任务、部署和集成文档。
+4. V0.1、V0.5 与 Personal V1 均已完成；后续是上游政策复核和日常维护。

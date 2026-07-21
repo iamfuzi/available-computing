@@ -1,541 +1,415 @@
-# Available Computing —— 接入手册
+# Available Computing —— 应用接入手册
 
-> 面向需要调用本服务的开发者 / 应用
-> 版本：v1.0 · 日期：2026-06-23
+> 版本：Personal V1
+> 更新日期：2026-07-21
+> 面向：调用统一代理的本地应用、脚本与第三方客户端
+> 关联文档：[部署指南](./05-deployment.md) · [当前架构](./03-architecture.md)
 
-本项目对外提供 **OpenAI 兼容接口**。任何支持自定义 `base_url` 的 OpenAI 客户端（官方 SDK、LangChain、LiteLLM、Cherry Studio、NextChat 等）都能直接接入，只需改 `base_url` 和 `api_key` 两处。
-
----
-
-## 目录
-
-1. [核心概念](#1-核心概念)
-2. [接入准备](#2-接入准备)
-3. [快速开始](#3-快速开始)
-4. [智能路由：怎么选模型](#4-智能路由怎么选模型)
-5. [接入第三方客户端](#5-接入第三方客户端)
-6. [鉴权方式](#6-鉴权方式)
-7. [接口参考](#7-接口参考)
-8. [Embedding 与 Rerank](#8-embedding-与-rerank)
-9. [限流与错误处理](#9-限流与错误处理)
-10. [常见问题](#10-常见问题)
+Available Computing 对 Chat、Embedding 和 Image 提供 OpenAI 风格接口，并提供 Rerank 扩展接口。调用方只使用本项目创建的 `ac_` 代理 Key，不直接接触各厂商 Key。
 
 ---
 
-## 1. 核心概念
+## 1. 地址与鉴权
 
-本项目聚合了多个 AI 厂商（OpenRouter、SiliconFlow、Groq、ZhiPu）的**免费模型**，对外暴露统一接口。你不需要关心：
+### 1.1 Base URL
 
-- 哪些模型现在免费、哪些可用
-- 各厂商的鉴权方式、请求格式差异
-- 某个模型是否限流、是否暂时不可用
+| 运行方式 | 管理页面 | SDK Base URL |
+|---|---|---|
+| Docker | `http://localhost:8080/` | `http://localhost:8080/v1` |
+| 源码开发 | `http://localhost:5173/` | `http://localhost:8002/v1` |
+| HTTPS 反向代理 | `https://ai.example.com/` | `https://ai.example.com/v1` |
 
-系统自动探测模型健康状态，在请求时路由到当前最合适的免费模型。
+源码开发时 `5173` 是页面，`8002` 是后端。Vite 也会代理浏览器中的 `/v1`，但 SDK 建议直接使用 `8002`。
 
-**一句话总结**：把它当成一个 OpenAI API，但后端是 N 个免费厂商的聚合池。
+### 1.2 创建代理 Key
 
----
+登录管理页面，进入“设置 → API 密钥”，创建名称明确的 `ac_` Key。可配置：
 
-## 2. 接入准备
+- 厂商白名单或黑名单。
+- 每分钟和每日请求上限（RPM/RPD）。
+- 默认路由偏好：延迟或能力。
+- 默认最小上下文长度。
 
-### 2.1 获取服务地址
+为不同应用创建不同 Key；停用某个应用时无需更换厂商凭证。代理 Key 可在本地管理页面查看和复制，因此应把管理页面也视为敏感界面。
 
-你需要知道本项目部署后的地址，本文用 `http://your-host:8000` 代指。接口前缀是 `/v1`，即：
+所有代理请求使用：
 
-```
-base_url = http://your-host:8000/v1
+```http
+Authorization: Bearer ac_your_key
 ```
 
-> 如果通过反向代理（nginx）部署，通常是 `https://your-domain/v1`。
+管理 JWT 也能调用代理，主要用于本机调试；它会过期，不适合长期集成。
 
-### 2.2 创建 API Key
+建议把凭证放进环境变量：
 
-在管理后台（浏览器访问 `http://your-host:5173` 或 `:8000/docs`）：
+```bash
+export AC_BASE_URL="http://localhost:8080/v1"
+export AC_API_KEY="ac_your_key"
+```
 
-1. 用管理员密码登录
-2. 进入「设置 → API 密钥」
-3. 创建一个密钥，得到形如 `ac_xxxxxxxxxxxxxxxx` 的字符串
-
-**这个 Key 只在创建时完整显示一次，请立即保存。** 它长期有效，适合写入应用配置/环境变量。
-
-> 也可以用管理员 JWT token 调用（见[第 6 节](#6-鉴权方式)），但 JWT 有过期时间，**不建议用于服务端常驻应用**。
+不要把真实 Key 写进源代码、Markdown、日志、截图或 Git 历史。
 
 ---
 
-## 3. 快速开始
+## 2. 接入前自检
 
-以下示例假设：
-- 服务地址：`http://localhost:8000`
-- API Key：`ac_xxxxxxxx`（替换为你自己的）
+先验证认证、策略与路由，不消耗上游推理额度：
+
+```bash
+curl "$AC_BASE_URL/ac/self-test" \
+  -H "Authorization: Bearer $AC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto:text"}'
+```
+
+成功响应示例：
+
+```json
+{
+  "ok": true,
+  "route": "auto:text",
+  "selected_model": "some-model-id",
+  "candidate_count": 4,
+  "checked": [
+    {"model": "some-model-id", "ok": true, "reason": null}
+  ]
+}
+```
+
+然后查看当前池状态：
+
+```bash
+curl "$AC_BASE_URL/ac/status" \
+  -H "Authorization: Bearer $AC_API_KEY"
+```
+
+这两个接口会应用该 Key 的厂商与上下文策略，所以结果就是该应用实际能看到的候选范围。
+
+---
+
+## 3. Chat Completions
 
 ### 3.1 cURL
 
 ```bash
-# 发起对话（选最聪明的模型）
-curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer ac_xxxxxxxx" \
+curl "$AC_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $AC_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "auto:smart",
-    "messages": [{"role": "user", "content": "用三句话解释量子纠缠"}]
+    "model": "auto:fast",
+    "messages": [
+      {"role": "user", "content": "用三句话解释向量数据库"}
+    ]
   }'
-
-# 流式输出
-curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer ac_xxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "auto:smart",
-    "messages": [{"role": "user", "content": "你好"}],
-    "stream": true
-  }'
-
-# 列出可用模型
-curl http://localhost:8000/v1/models \
-  -H "Authorization: Bearer ac_xxxxxxxx"
 ```
 
-### 3.2 Python（OpenAI SDK）
+流式响应：
 
 ```bash
-pip install openai
+curl -N "$AC_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $AC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto:text",
+    "messages": [{"role":"user","content":"你好"}],
+    "stream": true
+  }'
 ```
 
+### 3.2 Python OpenAI SDK
+
 ```python
+import os
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="ac_xxxxxxxx",
+    base_url=os.environ["AC_BASE_URL"],
+    api_key=os.environ["AC_API_KEY"],
 )
 
-# 流式对话
-response = client.chat.completions.create(
-    model="auto:smart",          # 详见第 4 节
-    messages=[{"role": "user", "content": "你好，介绍一下你自己"}],
+stream = client.chat.completions.create(
+    model="auto:text",
+    messages=[{"role": "user", "content": "你好"}],
     stream=True,
 )
-for chunk in response:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")
 
-# 列出可用模型
-for m in client.models.list().data:
-    print(m.id, m.param_size)
+for chunk in stream:
+    text = chunk.choices[0].delta.content
+    if text:
+        print(text, end="")
 ```
 
-### 3.3 Node.js（OpenAI SDK）
-
-```bash
-npm install openai
-```
+### 3.3 Node.js OpenAI SDK
 
 ```javascript
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  baseURL: 'http://localhost:8000/v1',
-  apiKey: 'ac_xxxxxxxx',
+  baseURL: process.env.AC_BASE_URL,
+  apiKey: process.env.AC_API_KEY,
 });
 
 const stream = await client.chat.completions.create({
-  model: 'auto:smart',
+  model: 'auto:text',
   messages: [{ role: 'user', content: '你好' }],
   stream: true,
 });
+
 for await (const chunk of stream) {
-  process.stdout.write(chunk.choices[0]?.delta?.content || '');
+  process.stdout.write(chunk.choices[0]?.delta?.content ?? '');
 }
 ```
 
 ---
 
-## 4. 智能路由：怎么选模型
+## 4. 模型与自动路由
 
-`model` 字段除了填具体模型 id，还支持 **auto 路由前缀**，由系统自动选模型。这是本项目的核心能力。
+### 4.1 获取模型
 
-### 4.1 三类路由前缀
+默认只返回可用于 Chat 的免费、健康且未冷却模型：
 
-| 前缀 | 含义 | 适用场景 |
-|------|------|---------|
-| **`auto:smart`** | 跨所有类别，选**参数量最大**的健康模型 | 要质量、要聪明，不介意慢（如复杂推理、长文写作） |
-| **`auto:fast`** | 跨所有类别，选**延迟最低**的健康模型 | 要速度、要吞吐（如简单问答、批量处理） |
-| `auto:text` | 文本类，选最快 | 只要文本对话 |
-| `auto:vision` | 多模态类，选最快 | 要图片理解 |
-| `auto:code` | 代码类，选最快 | 要代码生成 |
-
-### 4.2 选型建议
-
-```
-                 要质量？
-              ┌─── 是 ──→ auto:smart
-        起点 ─┤
-              └─── 否 ──→ auto:fast  （通用首选）
+```bash
+curl "$AC_BASE_URL/models" \
+  -H "Authorization: Bearer $AC_API_KEY"
 ```
 
-- **默认用 `auto:fast`**：覆盖绝大多数场景，速度最快
-- **任务复杂时用 `auto:smart`**：需要强推理/长上下文/代码能力时，系统会选当前最大的健康模型（可能是 72B、405B 甚至 600B 级别）
-- **指定具体模型**：当你明确知道要用某个模型时，直接填 id（如 `meta-llama/llama-3.3-70b-instruct`），系统支持模糊匹配（`llama-3.3-70b` 也能匹配到）
+能力过滤：
 
-### 4.3 排序规则
-
-`auto:smart` 和 `auto:fast` 的排序优先级：
-
-```
-1. 健康档位（永远是第一优先级）
-   healthy > slow > unknown > down（down 不参与）
-2. smart：参数量降序（参数量大优先，未知排最后）
-   fast ：响应延迟升序（快的优先）
+```bash
+curl "$AC_BASE_URL/models?category=embedding" -H "Authorization: Bearer $AC_API_KEY"
+curl "$AC_BASE_URL/models?category=rerank" -H "Authorization: Bearer $AC_API_KEY"
+curl "$AC_BASE_URL/models?category=image" -H "Authorization: Bearer $AC_API_KEY"
+curl "$AC_BASE_URL/models?category=all" -H "Authorization: Bearer $AC_API_KEY"
 ```
 
-> 注意：**健康是硬门槛**。一个 healthy 的 7B 模型会优先于 slow 的 72B——系统不会把请求打到已知不健康的模型上，即使它更大。
+每条记录包含标准字段，并通过 `x_ac_metadata` 提供上下文长度、健康分数、延迟、验证时间、免费类型和模态信息。
 
-### 4.4 查看模型参数量
+### 4.2 Chat 自动路由
 
-调用 `GET /v1/models`，每个模型带 `param_size` 字段（单位 B，即十亿参数）：
+| 模型值 | 选择方式 |
+|---|---|
+| `auto:text` | 文本模型，优先健康与低延迟 |
+| `auto:vision` | 支持图片理解的 Chat 模型 |
+| `auto:code` | 代码模型 |
+| `auto:fast` | 当前 Chat 候选中优先低延迟 |
+| `auto:smart` | 当前 Chat 候选中优先参数规模/能力 |
+
+`auto:*` 只从符合以下条件的模型中选择：明确免费、渠道有效、健康为 `healthy` 或 `slow`、不在 429 冷却、能力匹配，并满足代理 Key 和请求策略。
+
+Embedding 与 Rerank 当前要求填写具体模型 ID；Image 支持具体模型或 `auto:image`。
+
+### 4.3 请求级路由策略
+
+Chat、Image 和自检请求可带 `routing_policy`：
 
 ```json
 {
-  "id": "meta-llama/llama-3.3-70b-instruct",
-  "param_size": 70.0,
-  ...
+  "model": "auto:text",
+  "messages": [{"role": "user", "content": "你好"}],
+  "routing_policy": {
+    "exclude": ["openrouter"],
+    "min_context": 32000,
+    "prefer": "capability",
+    "fallback_chain": ["auto:fast"]
+  }
 }
 ```
 
-`param_size` 为 `null` 表示参数量无法自动识别（通常是闭源模型，如 gpt-4o、claude），在 smart 排序中排最后。
+字段说明：
+
+| 字段 | 含义 |
+|---|---|
+| `exclude` | 本次请求额外排除的厂商 ID |
+| `min_context` | 本次请求要求的最小上下文长度 |
+| `prefer` | `latency` 或 `capability` |
+| `fallback_chain` | 主路由失败后依次尝试的模型或 `auto:*` 路由 |
+
+请求策略只能收窄代理 Key 的权限。比如 Key 只允许 `groq`，请求不能通过策略放开其他厂商；请求的最小上下文也不能低于 Key 的默认要求。
 
 ---
 
-## 5. 接入第三方客户端
+## 5. Embedding
 
-因为完全 OpenAI 兼容，任何支持自定义 `base_url` 的客户端都能接入。
-
-### 5.1 LangChain（Python）
-
-```python
-from langchain_openai import ChatOpenAI
-
-llm = ChatOpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="ac_xxxxxxxx",
-    model="auto:smart",
-)
-print(llm.invoke("解释一下递归").content)
-```
-
-### 5.2 LiteLLM
-
-```python
-import litellm
-
-response = litellm.completion(
-    model="openai/auto:smart",                    # openai/ 前缀 + 你的模型名
-    messages=[{"role": "user", "content": "你好"}],
-    api_base="http://localhost:8000/v1",
-    api_key="ac_xxxxxxxx",
-)
-print(response.choices[0].message.content)
-```
-
-### 5.3 桌面客户端（Cherry Studio / NextChat / LobeChat 等）
-
-这类客户端通常有「自定义服务商」或「OpenAI 兼容」选项：
-
-| 配置项 | 填写 |
-|--------|------|
-| API 地址 / Base URL | `http://your-host:8000/v1` |
-| API Key | `ac_xxxxxxxx` |
-| 模型名 | `auto:smart` 或 `auto:fast`，或从 `/v1/models` 选具体 id |
-
-> 配置时如果客户端要求「模型列表」，可手动填入 `auto:smart`，客户端会原样转发给本项目。
-
-### 5.4 curl 作为通用兜底
-
-不支持 SDK 的环境（CI 脚本、shell 工具），直接用 curl 调第 3.1 节的命令即可。
-
----
-
-## 6. 鉴权方式
-
-所有 `/v1/*` 接口支持两种鉴权（任选其一），都在 `Authorization: Bearer <凭证>` 头中传递：
-
-### 6.1 API Key（推荐，用于应用对接）
-
-- 格式：`ac_` 开头的长字符串
-- 获取：管理后台「设置 → API 密钥」创建
-- 特点：**长期有效**，可禁用/删除，可创建多个分给不同应用
-- 用法：
-  ```bash
-  Authorization: Bearer ac_xxxxxxxx
-  ```
-
-### 6.2 JWT（用于管理后台）
-
-- 获取：`POST /api/v1/auth/login`，body `{"password": "管理员密码"}`，返回 `{"token": "..."}`
-- 特点：有效期 7 天，过期需重新登录
-- **不建议用于服务端应用**（会过期，且权限等同管理员）
+先从 `GET /models?category=embedding` 取得具体模型 ID：
 
 ```bash
-# 获取 JWT
-TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"password":"your-admin-password"}' | jq -r .token)
-
-# 用 JWT 调用
-curl http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer $TOKEN" ...
-```
-
-> 区分：`ac_` 开头 → 走 API Key 校验；其余 → 走 JWT 校验。系统自动识别。
-
----
-
-## 7. 接口参考
-
-详细的字段定义、参数范围请查阅 Swagger：`http://your-host:8000/docs`。以下是要点。
-
-### 7.1 POST /v1/chat/completions
-
-OpenAI 兼容的对话补全。请求体：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `model` | string | **必填**。具体 id 或 auto 前缀（见第 4 节） |
-| `messages` | array | **必填**。消息列表，同 OpenAI |
-| `stream` | bool | 是否流式，默认 false |
-| `max_tokens` | int | 最大生成 token 数 |
-| `temperature` | float | 采样温度 |
-| `top_p` | float | nucleus sampling |
-| `stop` | array | 停止词列表 |
-
-响应格式与 OpenAI 完全一致（含流式 SSE 格式）。
-
-### 7.2 GET /v1/models
-
-返回当前可用的免费、非 down 的对话模型。响应：
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "meta-llama/llama-3.3-70b-instruct",
-      "object": "model",
-      "created": 0,
-      "owned_by": "available-computing",
-      "param_size": 70.0
-    }
-  ]
-}
-```
-
-> 注意：`param_size` 是本项目扩展字段（OpenAI 标准无此字段），客户端会自动忽略不影响使用。
-
-### 7.3 管理接口（/api/v1/*）
-
-管理接口（模型列表、厂商管理、密钥管理等）需要 JWT 鉴权，详见 `/docs`。应用对接一般不需要调用这些。
-
----
-
-## 8. Embedding 与 Rerank
-
-除了对话，本项目还支持 **embedding**（文本向量化）和 **rerank**（文档重排序）两类模型的查询与调用。
-
-> **重要区别**：
-> - **embedding** 是 OpenAI 兼容端点（`/v1/embeddings`），多个厂商支持
-> - **rerank** 是 **SiliconFlow 兼容端点**（`/v1/rerank`），**不是 OpenAI 官方标准**，目前仅 SiliconFlow 提供免费模型
-
-### 8.1 查询有哪些模型
-
-默认 `/v1/models` 只返回对话模型。用 `category` 参数查询非对话模型：
-
-```bash
-# 查 embedding 模型
-curl http://localhost:8000/v1/models?category=embedding \
-  -H "Authorization: Bearer ac_xxxxxxxx"
-
-# 查 rerank 模型
-curl http://localhost:8000/v1/models?category=rerank \
-  -H "Authorization: Bearer ac_xxxxxxxx"
-
-# 查所有类别（含 embedding/rerank）
-curl http://localhost:8000/v1/models?category=all \
-  -H "Authorization: Bearer ac_xxxxxxxx"
-```
-
-### 8.2 调用 Embedding
-
-OpenAI 兼容格式。`model` 需填具体模型 id（**不支持 auto 路由**），可从 `?category=embedding` 查到：
-
-```bash
-curl http://localhost:8000/v1/embeddings \
-  -H "Authorization: Bearer ac_xxxxxxxx" \
+curl "$AC_BASE_URL/embeddings" \
+  -H "Authorization: Bearer $AC_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BAAI/bge-m3",
-    "input": "把这句话转成向量"
+    "model": "your-embedding-model-id",
+    "input": ["第一段文本", "第二段文本"]
   }'
 ```
 
-Python（OpenAI SDK 原生支持 embeddings）：
+Python OpenAI SDK：
 
 ```python
-from openai import OpenAI
-
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="ac_xxxxxxxx")
-resp = client.embeddings.create(
-    model="BAAI/bge-m3",
-    input="把这句话转成向量",
+result = client.embeddings.create(
+    model="your-embedding-model-id",
+    input=["第一段文本", "第二段文本"],
 )
-print(resp.data[0].embedding[:5])   # [0.01, -0.03, ...]
+vectors = [row.embedding for row in result.data]
 ```
 
-响应格式与 OpenAI 一致：`{"data": [{"embedding": [0.1, 0.2, ...], "index": 0}], ...}`
+---
 
-### 8.3 调用 Rerank
+## 6. Rerank
 
-> ⚠️ `/v1/rerank` 不是 OpenAI 标准端点，OpenAI SDK 不内置支持。需直接 HTTP 调用或用 SiliconFlow/LangChain 的 rerank 工具。
-
-给定一个 query 和一批 documents，返回按相关性排序的结果：
+`/v1/rerank` 采用 SiliconFlow/Cohere 风格，不属于 OpenAI 标准端点：
 
 ```bash
-curl http://localhost:8000/v1/rerank \
-  -H "Authorization: Bearer ac_xxxxxxxx" \
+curl "$AC_BASE_URL/rerank" \
+  -H "Authorization: Bearer $AC_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "BAAI/bge-reranker-v2-m3",
-    "query": "如何用 Python 读取文件",
+    "model": "your-rerank-model-id",
+    "query": "什么是免费算力代理？",
     "documents": [
-      "Python open() 函数可以打开文件",
-      "Java 的 File 类用于文件操作",
-      "with open(path) as f 可以安全地读取文件"
+      "它统一管理多个厂商的免费模型。",
+      "这是一段无关的天气信息。"
     ],
     "top_n": 2,
     "return_documents": true
   }'
 ```
 
-Python：
-
-```python
-import httpx
-
-resp = httpx.post(
-    "http://localhost:8000/v1/rerank",
-    headers={"Authorization": "Bearer ac_xxxxxxxx"},
-    json={
-        "model": "BAAI/bge-reranker-v2-m3",
-        "query": "如何用 Python 读取文件",
-        "documents": [
-            "Python open() 函数可以打开文件",
-            "Java 的 File 类用于文件操作",
-            "with open(path) as f 可以安全地读取文件",
-        ],
-        "top_n": 2,
-    },
-    timeout=60,
-)
-for r in resp.json()["results"]:
-    print(r["relevance_score"], r["index"], r.get("document", {}).get("text", ""))
-# 0.98 2  with open(path) as f 可以安全地读取文件
-# 0.91 0  Python open() 函数可以打开文件
-```
-
-响应格式（SiliconFlow 兼容）：
-
-```json
-{
-  "results": [
-    {"index": 2, "relevance_score": 0.98, "document": {"text": "..."}},
-    {"index": 0, "relevance_score": 0.91, "document": {"text": "..."}}
-  ]
-}
-```
-
-### 8.4 常见问题
-
-**Q: 为什么 embedding/rerank 模型没有 auto 路由？**
-A: 这两类模型用途专一（向量化、排序），通常需要指定具体模型保证向量维度/rerank 行为一致。auto 路由会随机选模型导致向量空间不一致。
-
-**Q: 调用时报 404？**
-A: 用 `GET /v1/models?category=embedding`（或 rerank）确认模型 id 是否存在、是否健康。模型 id 支持模糊匹配（如 `bge-m3` 能匹配 `BAAI/bge-m3`）。
-
-**Q: 哪些厂商提供免费 embedding/rerank？**
-A: 当前仅 SiliconFlow。其他厂商（OpenRouter/Groq 等）的这类模型非免费，不在池中。
+调用前通过 `GET /models?category=rerank` 获取模型 ID。第三方 OpenAI SDK 没有标准 Rerank 方法，使用其底层 HTTP 客户端或普通请求库即可。
 
 ---
 
-## 9. 限流与错误处理
+## 7. Image Generation
 
-### 9.1 限流
+```bash
+curl "$AC_BASE_URL/images/generations" \
+  -H "Authorization: Bearer $AC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto:image",
+    "prompt": "一只在月球上写代码的橘猫，扁平插画",
+    "n": 1,
+    "response_format": "url"
+  }'
+```
 
-| 维度 | 限制 |
-|------|------|
-| 对话接口 `/v1/chat/completions` | 60 次/分钟/IP |
-| 登录 `/api/v1/auth/login` | 10 次/5 分钟/IP |
+支持的通用字段包括 `model`、`prompt`、`n`（只能为 1）、`quality`、`size`、`response_format`（当前为 `url`）、`user`、`watermark_enabled` 与 `routing_policy`。上游是否接受可选字段取决于最终选中的模型。
 
-超限返回 `429`。
+Python OpenAI SDK：
 
-### 9.2 错误响应格式
+```python
+result = client.images.generate(
+    model="auto:image",
+    prompt="一只在月球上写代码的橘猫，扁平插画",
+    response_format="url",
+)
+print(result.data[0].url)
+```
 
-所有错误遵循 OpenAI 格式：
+---
+
+## 8. 诊断接口
+
+### 8.1 扩展模型目录
+
+```bash
+curl "$AC_BASE_URL/ac/models?include_unavailable=true" \
+  -H "Authorization: Bearer $AC_API_KEY"
+```
+
+可用查询参数：
+
+- `category`：按能力类型过滤。
+- `include_unavailable=false`：只返回当前可路由模型。
+
+扩展目录包含厂商、免费证据、健康状态、验证方式、验证新鲜度、429 冷却、上下文和参数规模，适合监控程序使用。
+
+### 8.2 响应头
+
+成功或失败响应会尽可能携带：
+
+| Header | 说明 |
+|---|---|
+| `X-AC-Route` | 调用方请求的路由或模型 |
+| `X-AC-Selected-Model` | 最终选中的模型 |
+| `X-AC-Selected-Provider` | 最终厂商 |
+| `X-AC-Actual-Model` | `厂商/模型` 组合 |
+| `X-AC-Fallback-Triggered` | 是否触发回退 |
+| `X-AC-Attempted-Models` | 尝试过的模型列表 |
+| `X-AC-Fallback-Count` | 回退次数 |
+| `X-AC-Model-Verified-At` | 选中模型最近验证时间 |
+| `X-AC-Retry-After` | 建议重试等待秒数 |
+
+如果通过浏览器读取这些头，反向代理还需允许对应的 CORS expose headers。
+
+---
+
+## 9. 错误与重试
+
+统一错误结构：
 
 ```json
 {
   "error": {
-    "message": "No available models for auto:smart",
+    "message": "No available model",
     "type": "invalid_request_error",
-    "param": "model",
-    "code": null
+    "code": "no_available_models",
+    "retry_after": 60,
+    "attempted_models": ["model-a", "model-b"]
   }
 }
 ```
 
-### 9.3 常见错误码
+常见状态：
 
-| HTTP | 含义 | 处理建议 |
-|------|------|---------|
-| 401 | 鉴权失败（Key 无效/过期） | 检查 API Key 是否正确、是否被禁用 |
-| 404 | 模型不存在或无可用模型 | 用 `/v1/models` 确认模型名；auto 路由时说明池中暂无健康模型，稍后重试 |
-| 429 | 触发限流 | 退避重试（指数退避） |
-| 502 | 上游厂商返回错误 | 通常是厂商侧问题，换模型重试或用 `auto:` 让系统自动避让 |
+| HTTP | 常见含义 | 调用方处理 |
+|---:|---|---|
+| `401` | Key 无效、停用或 JWT 过期 | 检查凭证，不要盲目重试 |
+| `404` | 模型不存在或当前无合格候选 | 刷新模型列表或改用 `auto:*` |
+| `422` | 请求字段不合法 | 修正参数 |
+| `429` | 本地 Key 限制、模型预算或上游限流 | 优先读取 `retry_after` / `X-AC-Retry-After` |
+| `502` | 上游返回不可用响应 | 短暂退避；检查尝试列表 |
+| `503` | 当前候选都忙或无可路由渠道 | 指数退避并查询 `/ac/status` |
 
-### 9.4 重试建议
-
-对于生产环境，建议：
-
-- **用 auto 路由而非固定模型**：单个模型不可用时，auto 会自动跳过它选别的，无需你处理重试
-- 对 `502`/网络错误做**指数退避重试**（1s → 2s → 4s，最多 3 次）
-- 对 `429` 做退避，但**降低频率**而非立即重试
+Chat 路由已经对可重试的上游错误执行候选回退。客户端仍应设置有限次数的指数退避，并加入随机抖动；不要无上限循环，否则会同时耗尽多个免费渠道。
 
 ---
 
-## 10. 常见问题
+## 10. 第三方客户端
 
-**Q: 为什么有时 auto:smart 选到的模型回答质量一般？**
-A: smart 按参数量排序，参数量大通常更强，但不绝对（代际更新、模型类型也有影响）。如果对质量敏感，建议在 `/v1/models` 里挑具体的大模型 id 直接调用。
+支持自定义 OpenAI Base URL 与 API Key 的客户端，一般填写：
 
-**Q: 模型偶尔返回很慢或超时？**
-A: 免费模型有厂商侧的限流（如 OpenRouter 的 daily free quota）。系统会把这类模型标为 slow 降权，但仍在池中。用 `auto:fast` 优先选最快的。
+```text
+API type: OpenAI Compatible
+Base URL: http://localhost:8080/v1
+API Key: ac_your_key
+Model: auto:text
+```
 
-**Q: 能同时用多个模型吗？**
-A: 可以。并发请求会路由到不同模型（每次请求独立选模型）。如果想固定，就指定具体 id。
+若客户端会先校验模型列表，使用 `auto:text` 前先确认它允许手工输入不在 `/v1/models` 中的虚拟模型名；否则选择列表中的具体模型。
 
-**Q: 支持 function calling / tool use 吗？**
-A: 取决于被路由到的具体模型是否支持。本项目透传请求，不额外处理。建议直接填支持 tool 的具体模型 id，而非 auto 路由。
+LangChain 示例：
 
-**Q: API Key 泄露了怎么办？**
-A: 在管理后台禁用或删除该 Key，立即创建新的。被禁用的 Key 立即失效。
+```python
+import os
+from langchain_openai import ChatOpenAI
 
-**Q: 如何监控可用性？**
-A: 管理后台的「算力池」页面实时展示每个模型的健康状态、延迟、参数量。应用侧建议对 `/v1/models` 做周期性探活。
+llm = ChatOpenAI(
+    base_url=os.environ["AC_BASE_URL"],
+    api_key=os.environ["AC_API_KEY"],
+    model="auto:text",
+)
+
+print(llm.invoke("你好").content)
+```
 
 ---
 
-## 附录：相关文档
+## 11. 接入检查清单
 
-- [01-PRD.md](./01-PRD.md) —— 产品需求
-- [03-architecture.md](./03-architecture.md) —— 系统架构
-- [05-deployment.md](./05-deployment.md) —— 部署指南
-- Swagger 交互文档 —— `http://your-host:8000/docs`
-- 管理后台 —— `http://your-host:5173`
+- 使用的是 `ac_` 代理 Key，而不是任一厂商 Key。
+- Docker 使用 `8080/v1`；源码开发 SDK 使用 `8002/v1`。
+- `/ac/self-test` 和 `/ac/status` 对该 Key 返回预期候选。
+- Key 的厂商范围、RPM/RPD 和最小上下文符合当前应用用途。
+- Chat 使用合适的 `auto:*` 或具体模型；Embedding/Rerank 使用对应分类中的具体 ID。
+- 客户端对 429/503 有有限重试，并记录 `X-AC-*` 诊断头但不记录 Authorization。
+- 真实 Key 位于 Secret 管理或环境变量中，没有进入仓库和日志。

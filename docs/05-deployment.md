@@ -1,333 +1,284 @@
-# Available Computing —— 部署文档
+# Available Computing —— 部署与运维指南
 
-> 版本：v0.5
-> 日期：2026-05-06
-
----
-
-## 目录
-
-1. [Docker 部署（推荐）](#1-docker-部署推荐)
-2. [本地开发](#2-本地开发)
-3. [环境变量参考](#3-环境变量参考)
-4. [生产部署建议](#4-生产部署建议)
-5. [数据备份与恢复](#5-数据备份与恢复)
-6. [常见问题](#6-常见问题)
+> 版本：Personal V1
+> 更新日期：2026-07-21
+> 关联文档：[当前架构](./03-architecture.md) · [接入手册](./06-integration.md)
 
 ---
 
-## 1. Docker 部署（推荐）
+## 1. 先选运行方式
 
-### 前置要求
+| 模式 | 页面地址 | 后端地址 | 用途 |
+|---|---|---|---|
+| 源码开发 | `http://localhost:5173/` | `http://localhost:8002/` | 开发、调试、看热更新日志 |
+| Docker 单容器 | `http://localhost:8080/` | 同一地址 | 长期个人运行 |
 
-- Docker Engine 20.10+ 或 OrbStack
-- 1GB 磁盘空间（镜像约 400MB）
+不要在源码开发模式访问 `8080`；该端口只在 Docker 容器启动后存在。
 
-### 步骤
+---
+
+## 2. Docker 部署（推荐）
+
+### 2.1 前置要求
+
+- Docker Engine / Docker Desktop / OrbStack，支持 Docker Compose v2。
+- 本机可访问所添加厂商的 API。
+- `sqlite3` 仅在执行宿主机备份脚本时需要。
+
+### 2.2 首次启动
 
 ```bash
-# 1. 克隆仓库
 git clone https://github.com/iamfuzi/available-computing.git
 cd available-computing
 
-# 2. 创建密钥文件
 mkdir -p secrets
-echo "your-secure-password" > secrets/admin_password.txt
-python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(32))"
+openssl rand -base64 24 > secrets/admin_password.txt
+python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(64))"
+chmod 600 secrets/admin_password.txt secrets/jwt_secret.txt
 
-# 3. 启动
-docker compose up -d
-
-# 4. 验证
-curl -s http://localhost:8080/ | head -3
+docker compose up -d --build
+curl http://localhost:8080/api/status
 ```
 
-浏览器访问 `http://localhost:8080`，用设置的密码登录。
+浏览器打开 `http://localhost:8080/`。登录密码就是 `secrets/admin_password.txt` 中的内容。
 
-### 管理命令
+首次登录后的建议顺序：
+
+1. 在“厂商管理”添加符合个人免费规则的渠道。
+2. 等待自动发现完成，在算力池确认存在健康模型。
+3. 在“设置 → API 密钥”创建一个 `ac_` 代理 Key，并按用途设置厂商范围及 RPM/RPD。
+4. 调用 `/v1/ac/self-test`，再接入实际应用。
+
+### 2.3 日常命令
 
 ```bash
-# 查看日志
-docker compose logs -f
+# 状态
+docker compose ps
 
-# 停止
+# 持续查看日志
+docker compose logs -f app
+
+# 重启
+docker compose restart app
+
+# 拉取代码后重新构建
+docker compose up -d --build
+
+# 停止但保留数据
 docker compose down
-
-# 停止并清除数据
-docker compose down -v
-
-# 重新构建（代码更新后）
-docker compose build --no-cache && docker compose up -d
 ```
 
-### 架构
-
-```
-docker compose up
-  └─ 容器 (Python 3.12 slim)
-     ├─ FastAPI (uvicorn, port 8080)
-     │   ├─ /api/v1/*     管理接口（需 JWT）
-     │   ├─ /v1/*         OpenAI 兼容代理（需 JWT）
-     │   ├─ /ws/events    WebSocket 推送（需 JWT）
-     │   └─ /*            React 前端静态文件
-     ├─ SQLite            /app/data/db.sqlite
-     └─ 定时任务          发现 / 探测 / 清理
-```
-
-单容器，无 Nginx，FastAPI 直接服务前端静态文件。
+当前 Compose 把宿主机 `./backend/data` 挂载到容器 `/app/data`。不要执行会删除该目录的命令；项目也不要求使用 `docker compose down -v`。
 
 ---
 
-## 2. 本地开发
+## 3. 源码开发
 
-### 后端
+### 3.1 安装依赖
+
+需要 Python 3.11+、Node.js 22+ 和 npm。
 
 ```bash
 cd backend
-
-# 安装依赖
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# 设置必要环境变量
-export JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
-export ADMIN_PASSWORD=dev
-
-# 启动（热重载）
-uvicorn main:app --reload --port 8000
-```
-
-后端运行在 `http://localhost:8000`。
-
-### 前端
-
-```bash
-cd frontend
-
-# 安装依赖
+cd ../frontend
 npm install
-
-# 启动开发服务器
-npm run dev
+cd ..
 ```
 
-前端运行在 `http://localhost:5173`，自动代理 `/api` 和 `/ws` 到后端 `:8000`。
-
-### 构建前端到后端
+### 3.2 准备本地 Secret
 
 ```bash
-cd frontend && npm run build
-cp -r dist ../backend/static
-# 后端重启后即可通过 :8000 访问前端
+mkdir -p secrets
+openssl rand -base64 24 > secrets/admin_password.txt
+python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(64))"
+chmod 600 secrets/admin_password.txt secrets/jwt_secret.txt
 ```
+
+如果仓库已经在安全位置保存了这两个文件，不要覆盖现有值。管理员密码参与上游凭证加密；更换它会导致旧密文无法解密。
+
+### 3.3 一键启动
+
+```bash
+./scripts/dev.sh
+```
+
+脚本同时启动：
+
+- 前端：`http://localhost:5173/`
+- 后端：`http://localhost:8002/`
+
+Vite 把 `/api`、`/v1` 与 `/ws` 转发到后端。终端中的两组日志会合并显示；按 `Ctrl-C` 会清理两个子进程。
+
+快速检查：
+
+```bash
+curl http://localhost:8002/api/status
+curl -I http://localhost:5173/
+```
+
+如果提示端口已占用，先用 `lsof -nP -iTCP:5173 -sTCP:LISTEN` 和 `lsof -nP -iTCP:8002 -sTCP:LISTEN` 找到旧进程；不要重复启动第二套服务。
 
 ---
 
-## 3. 环境变量参考
+## 4. 配置参考
 
-### 必须设置
+### 4.1 必填项
 
-| 变量 | 说明 | 示例 |
-|------|------|------|
-| `JWT_SECRET` | JWT 签名密钥，至少 32 字节随机 | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-| `ADMIN_PASSWORD` | 管理员登录密码 | 任意非空字符串 |
+直接变量与文件变量二选一，文件变量优先：
 
-两个变量都支持 `*_FILE` 后缀读取文件（Docker Secrets 模式）：
+| 直接变量 | 文件变量 | 用途 |
+|---|---|---|
+| `ADMIN_PASSWORD` | `ADMIN_PASSWORD_FILE` | 管理员登录和上游 Key 加密密钥派生 |
+| `JWT_SECRET` | `JWT_SECRET_FILE` | 管理端 JWT 签名 |
 
-| 变量 | 说明 |
-|------|------|
-| `JWT_SECRET_FILE` | JWT 密钥文件路径，如 `/run/secrets/ac_jwt_secret` |
-| `ADMIN_PASSWORD_FILE` | 密码文件路径，如 `/run/secrets/ac_admin_password` |
-
-`*_FILE` 优先于直接设值。
-
-### 可选设置
+### 4.2 路径与跨域
 
 | 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DATA_DIR` | `./data` | 数据库存储目录 |
-| `WHITELIST_PATH` | `whitelist/providers.yaml` | 免费模型白名单文件 |
-| `SLOW_THRESHOLD_MS` | `1000` | 响应时间超过此值标记为"慢" |
+|---|---|---|
+| `DATA_DIR` | `./data` | SQLite 和运行数据目录 |
+| `WHITELIST_PATH` | 仓库 `whitelist/providers.yaml` | 免费模型审定基线 |
+| `PROVIDERS_PATH` | 仓库 `providers/` | 声明式厂商目录 |
+| `CORS_ORIGINS` | `*` | 逗号分隔的允许 Origin；公网部署建议收紧 |
 
-### 运行时可调（通过 Settings 页面）
+### 4.3 探测与复核
 
-| 设置项 | 默认 | 范围 | 说明 |
-|--------|------|------|------|
-| `discovery_interval_hours` | 6 | 1-48 | 自动重新发现模型的间隔 |
-| `probe_interval_hours` | 2 | 1-24 | 主动健康探测间隔 |
-| `slow_threshold_ms` | 1000 | 100-10000 | 慢速阈值（毫秒） |
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `SLOW_THRESHOLD_MS` | `1000` | 慢响应阈值 |
+| `PROBE_INTERVAL_BETWEEN_MODELS_SEC` | `2` | 同一渠道模型探测间隔 |
+| `PROBE_GLOBAL_CONCURRENCY` | `5` | 全局探测并发 |
+| `HEARTBEAT_IDLE_DAYS` | `3` | 多久无真实流量后才允许心跳 |
+| `HEARTBEAT_MIN_PROVIDER_RPD` | `100` | 配额不明确或过小则不做心跳 |
+| `HEARTBEAT_BUDGET_RATIO` | `0.01` | 心跳预算占已知日限额比例 |
+| `EVENT_RECHECK_MAX_ATTEMPTS` | `3` | 事件复核最大次数 |
+| `EVENT_RECHECK_WINDOW_MINUTES` | `30` | 多次复核关联窗口 |
 
-修改后立即生效，无需重启。
+目录刷新与探测扫描周期可在设置页修改，默认分别为 6 小时和 2 小时。
+
+### 4.4 代理保护
+
+| 变量 | 默认值 | 说明 |
+|---|---:|---|
+| `PROXY_RATE_WINDOW_SECONDS` | `60` | 本地代理限流窗口 |
+| `PROXY_API_KEY_RATE_LIMIT` | `120` | 未单独配置时每个代理 Key 的基础路由限流 |
+| `PROXY_ADMIN_RATE_LIMIT` | `600` | 管理 JWT 调用代理的限制 |
+| `PROXY_IP_FALLBACK_RATE_LIMIT` | `600` | IP 兜底保护 |
+| `PROXY_MODEL_CONCURRENCY_LIMIT` | `2` | 单渠道单模型并发上限 |
+
+代理 Key 页面设置的 RPM/RPD 会叠加执行，不会覆盖系统保护。
 
 ---
 
-## 4. 生产部署建议
+## 5. 数据、迁移与备份
 
-### 反向代理 + HTTPS
+### 5.1 数据位置
 
-生产环境建议在前面加一层 Caddy 或 Nginx 终止 TLS：
+- 源码开发：`backend/data/db.sqlite`
+- Docker：宿主机同一文件，通过挂载映射到 `/app/data/db.sqlite`
+- 上游凭证、代理 Key、健康历史、候选池和通知都在 SQLite 中。
+- `secrets/` 与 `backend/data/` 被 Git 忽略，但仍应限制本机文件权限。
 
-#### Caddy（推荐，自动 HTTPS）
+应用启动时创建缺失表并应用 Alembic 迁移。升级前仍应先做一致性备份。
 
-```Caddyfile
-ai.yourdomain.com {
-    reverse_proxy localhost:8080
+### 5.2 在线备份
+
+SQLite 使用 WAL，运行中不要只复制 `db.sqlite`。使用仓库脚本调用 SQLite Online Backup：
+
+```bash
+./scripts/backup.sh
+```
+
+脚本会把权限为 `600` 的备份写到 `backend/data/backups/`，然后执行完整性检查并输出文件路径。
+
+### 5.3 恢复演练
+
+```bash
+./scripts/check-backup.sh \
+  backend/data/backups/available-computing-YYYYMMDD-HHMMSS.db
+```
+
+检查脚本在临时目录复制备份、升级到当前迁移版本，并执行 `integrity_check` 与 `foreign_key_check`；不会修改正在使用的数据库。
+
+### 5.4 真正恢复
+
+真正替换数据库属于有状态操作：
+
+1. 停止应用。
+2. 先再次备份当前数据库。
+3. 对目标备份运行恢复检查。
+4. 把目标备份复制为 `backend/data/db.sqlite`，权限设为 `600`。
+5. 删除与旧数据库对应的 `db.sqlite-wal`、`db.sqlite-shm` 前，确认应用已经停止且目标路径准确。
+6. 启动应用，检查 `/api/status`、登录、渠道数和 `/v1/ac/status`。
+
+管理员密码 Secret 也必须与备份时期一致，否则已加密上游 Key 无法解密。
+
+---
+
+## 6. 公网访问
+
+个人使用优先选择仅局域网、Tailscale/WireGuard，或反向代理 HTTPS。若必须暴露公网：
+
+- Compose 端口改为 `127.0.0.1:8080:8080`，只让反向代理连接。
+- 为域名启用 TLS，保留 WebSocket Upgrade 头。
+- 设置精确的 `CORS_ORIGINS`。
+- 不共享管理员密码、上游 Key 或高权限代理 Key。
+- 为不同客户端创建独立 `ac_` Key，设置厂商范围和 RPM/RPD，方便单独停用。
+
+Caddy 最小配置：
+
+```caddyfile
+ai.example.com {
+    reverse_proxy 127.0.0.1:8080
 }
 ```
 
-```bash
-# 启动
-caddy reload --config Caddyfile
-```
+---
 
-#### Nginx
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name ai.yourdomain.com;
-
-    ssl_certificate     /etc/ssl/cert.pem;
-    ssl_certificate_key /etc/ssl/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # WebSocket
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-```
-
-### 安全加固
+## 7. 升级流程
 
 ```bash
-# 密码至少 16 位
-echo "$(openssl rand -base64 24)" > secrets/admin_password.txt
+# 1. 先备份并检查
+backup_path="$(./scripts/backup.sh)"
+./scripts/check-backup.sh "$backup_path"
 
-# JWT 密钥 64 字节
-python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(64))"
+# 2. 获取代码后重建
+git pull --ff-only
+docker compose up -d --build
+
+# 3. 检查
+docker compose ps
+curl http://localhost:8080/api/status
+docker compose logs --tail=100 app
 ```
 
-### 完整 docker-compose 示例（含 Caddy）
-
-```yaml
-services:
-  app:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    ports:
-      - "127.0.0.1:8080:8080"   # 仅本地可达，由 Caddy 代理
-    volumes:
-      - app-data:/app/data
-    environment:
-      - ADMIN_PASSWORD_FILE=/run/secrets/ac_admin_password
-      - JWT_SECRET_FILE=/run/secrets/ac_jwt_secret
-    secrets:
-      - ac_admin_password
-      - ac_jwt_secret
-    restart: unless-stopped
-
-  caddy:
-    image: caddy:2
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy-data:/data
-      - caddy-config:/config
-    restart: unless-stopped
-
-volumes:
-  app-data:
-  caddy-data:
-  caddy-config:
-
-secrets:
-  ac_admin_password:
-    file: ./secrets/admin_password.txt
-  ac_jwt_secret:
-    file: ./secrets/jwt_secret.txt
-```
+源码开发升级后分别执行 `pip install -r backend/requirements.txt` 与 `npm install --prefix frontend`，再运行 `./scripts/dev.sh`。
 
 ---
 
-## 5. 数据备份与恢复
+## 8. 常见问题
 
-所有数据存储在单个 SQLite 文件中。
+### 页面打不开
 
-### 备份
+- 源码开发请打开 `http://localhost:5173/`，并确认 `5173`、`8002` 都在监听。
+- Docker 请打开 `http://localhost:8080/`，并运行 `docker compose ps` 与 `docker compose logs app`。
+- `curl /api/status` 正常而页面异常时，优先检查前端构建或 Vite 进程。
 
-```bash
-# Docker 部署
-docker compose exec app sqlite3 /app/data/db.sqlite ".backup /app/data/backup.sqlite"
-docker compose cp app:/app/data/backup.sqlite ./backup-$(date +%Y%m%d).sqlite
+### 添加渠道后没有模型
 
-# 或直接复制（先停止容器）
-docker compose down
-cp data/db.sqlite ./backup-$(date +%Y%m%d).sqlite
-docker compose up -d
-```
+查看渠道状态与后台日志。常见原因是 Key 无效、上游网络不可达、模型目录不含审定免费项，或该厂商不再满足准入政策。系统不会为了显示数量把未知/付费模型自动标成免费。
 
-### 恢复
+### 模型存在但不能路由
 
-```bash
-docker compose down
-cp backup-20260506.sqlite data/db.sqlite
-docker compose up -d
-```
+在管理页查看健康状态，或使用 `/v1/ac/models`、`/v1/ac/status`。模型可能尚未真实验证、进入 429 冷却、渠道被停用、代理 Key 策略排除了厂商，或能力类型与端点不匹配。
 
-### 白名单更新
+### 修改管理员密码后渠道全部鉴权失败
 
-白名单文件 `whitelist/providers.yaml` 打包在镜像内。更新时：
+管理员密码用于派生本地加密密钥，不能在不知道旧密码的情况下直接替换。恢复原密码 Secret，启动并确认渠道可解密后，再通过受控迁移方式重新加密凭证。
 
-```bash
-# 修改 whitelist/providers.yaml 后重新构建
-docker compose build --no-cache && docker compose up -d
-```
+### 如何安全提交问题
 
----
-
-## 6. 常见问题
-
-### 启动报 `JWT_SECRET is required`
-
-必须设置 `JWT_SECRET` 或 `JWT_SECRET_FILE` 环境变量。
-
-### 忘记管理员密码
-
-```bash
-# 重新生成密码文件
-echo "new-password" > secrets/admin_password.txt
-docker compose restart
-```
-
-### 端口冲突
-
-```yaml
-# docker-compose.yml 中修改端口
-ports:
-  - "9090:8080"   # 改为 9090
-```
-
-### 模型发现后健康状态全是 unknown
-
-健康探测是定时任务（默认每 2 小时），新添加的模型需要等待下一轮探测。也可以通过 OpenAI 代理发一次真实调用来立即生成被动健康记录。
-
-### Docker 构建慢
-
-首次构建需要下载 Node 和 Python 基础镜像。后续构建会利用缓存，只重新构建变更层。
-
-### 数据库锁定错误
-
-SQLite 使用 WAL 模式，支持并发读写。如果遇到锁定错误，检查是否有多个进程同时写入同一个数据库文件。
+附上版本、运行模式、错误时间、HTTP 状态和脱敏后的日志。必须移除 `Authorization`、Cookie、上游 Key、`ac_` Key、管理员密码以及包含这些值的请求体。
