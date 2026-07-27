@@ -42,6 +42,12 @@ JWT_EXPIRE_DAYS = 7
 
 PROBE_TIMEOUT_SECONDS = 10
 SLOW_RESPONSE_THRESHOLD_MS = int(os.environ.get("SLOW_THRESHOLD_MS", "1000"))
+# How many consecutive transient upstream errors (5xx / network / timeout)
+# a model must accrue before being marked "down" and evicted from the
+# candidate pool. Below the threshold a failing model is only demoted to
+# "slow" so it stays routable at lower priority and recovers on the next
+# success. Free tiers produce sporadic 500s that don't reflect real outage.
+PASSIVE_ERROR_DOWN_THRESHOLD = int(os.environ.get("PASSIVE_ERROR_DOWN_THRESHOLD", "3"))
 # Delay between consecutive probes to models on the same channel, to avoid
 # tripping per-provider rate limits during a probe sweep. Free tiers on
 # providers like OpenRouter have very small daily budgets and a burst of

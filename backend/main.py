@@ -1,5 +1,6 @@
 import os
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,15 @@ from api.middleware import RequestIdMiddleware
 from api.proxy import router as proxy_router
 from ws.events import router as ws_router, start_cleanup_task
 from services.scheduler import init_scheduler, shutdown_scheduler
+
+# Application-level logging for routing decisions. Default INFO surfaces the
+# request resolve / upstream ok-fail / route-exhausted lines; DEBUG (set via
+# LOG_LEVEL=debug) additionally shows why each candidate was skipped, which is
+# what you want when investigating "why didn't AC pick model X".
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "info").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 
 def get_key_fn(channel):

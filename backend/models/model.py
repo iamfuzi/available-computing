@@ -31,6 +31,11 @@ class Model(SQLModel, table=True):
     rate_limited_until: Optional[datetime] = None
     last_429_at: Optional[datetime] = None
     consecutive_429: int = Field(default=0)
+    # Consecutive non-rate-limit upstream errors (5xx, network, timeout). A
+    # single transient error demotes the model to "slow" (still routable, just
+    # deprioritized); only PASSIVE_ERROR_DOWN_THRESHOLD in a row mark it "down"
+    # and remove it from the candidate pool. Any success resets the count.
+    consecutive_errors: int = Field(default=0)
     is_active: bool = Field(default=True, index=True)
     consecutive_billing_failures: int = Field(default=0)
     param_size: Optional[float] = None      # billions, used by auto:smart routing

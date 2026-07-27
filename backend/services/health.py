@@ -17,6 +17,8 @@ from config import (
     HEARTBEAT_MIN_PROVIDER_RPD,
     HEARTBEAT_BUDGET_RATIO,
     HEARTBEAT_REAL_TRAFFIC_RESERVE_RATIO,
+    PASSIVE_ERROR_DOWN_THRESHOLD,
+    SLOW_RESPONSE_THRESHOLD_MS,
 )
 
 
@@ -83,19 +85,35 @@ async def record_passive_health(
     channel_id: str,
     decrypted_key: str,
 ):
-    from config import SLOW_RESPONSE_THRESHOLD_MS
+    """Record the outcome of a real proxy call and update model health.
+
+    A single transient error (5xx / network / timeout) does NOT evict a model
+    from the candidate pool — free tiers produce sporadic 500s that don't
+    reflect a real outage, and evicting on one error left models stranded as
+    "down" until a slow probe happened to restore them. Instead:
+
+    - any error increments ``consecutive_errors`` and demotes the model to
+      ``slow`` (still routable, just deprioritized);
+    - only ``PASSIVE_ERROR_DOWN_THRESHOLD`` errors in a row mark it ``down``
+      and remove it from the pool;
+    - any success clears the counter and restores ``healthy``/``slow``.
+    """
+    now = datetime.now(timezone.utc)
+
+    # Resolve the resulting status before opening the session.
     if error_code:
-        status = "down"
+        # The caller passes the running counter via the model row; we re-read
+        # it inside the transaction below to avoid races, then decide.
+        status = None  # decided per-model inside the transaction
     elif response_ms >= SLOW_RESPONSE_THRESHOLD_MS:
         status = "slow"
     else:
         status = "healthy"
 
-    now = datetime.now(timezone.utc)
     with Session(engine) as session:
         record = HealthRecord(
             model_id=model_id,
-            status=status,
+            status=status if status is not None else "slow",
             response_ms=response_ms,
             error_code=error_code,
             is_passive=True,
@@ -108,7 +126,18 @@ async def record_passive_health(
 
         m = session.get(Model, model_id)
         if m:
-            m.health_status = status
+            if error_code:
+                # Transient-error tolerance: demote to "slow" unless the
+                # consecutive count crosses the threshold, then "down".
+                m.consecutive_errors = (m.consecutive_errors or 0) + 1
+                if m.consecutive_errors >= PASSIVE_ERROR_DOWN_THRESHOLD:
+                    final_status = "down"
+                else:
+                    final_status = "slow"
+            else:
+                m.consecutive_errors = 0
+                final_status = status  # healthy or slow (by latency)
+            m.health_status = final_status
             m.last_response_ms = response_ms
             m.last_checked_at = now
             m.last_real_call_at = now

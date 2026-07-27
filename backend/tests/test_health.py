@@ -28,22 +28,58 @@ class TestRecordPassiveHealth:
         assert records[0].status == "slow"
 
     @pytest.mark.asyncio
-    async def test_down_status_with_error(self, db_session, sample_model, sample_channel):
+    async def test_single_error_demotes_to_slow_not_down(self, db_session, sample_model, sample_channel):
+        """A single transient error must not evict the model — it stays routable as 'slow'."""
         from services.health import record_passive_health
-        await record_passive_health(sample_model.id, 500, "rate_limited", sample_channel.id, "sk-test")
+        await record_passive_health(sample_model.id, 500, "server_error", sample_channel.id, "sk-test")
 
         records = db_session.exec(select(HealthRecord)).all()
-        assert records[0].status == "down"
-        assert records[0].error_code == "rate_limited"
+        # The HealthRecord itself records the demoted status, not "down".
+        assert records[0].status == "slow"
+        assert records[0].error_code == "server_error"
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "slow"
+        assert sample_model.consecutive_errors == 1
 
     @pytest.mark.asyncio
-    async def test_error_takes_precedence(self, db_session, sample_model, sample_channel):
-        """Even with slow response time, error_code → 'down'."""
+    async def test_error_with_slow_response_still_slow(self, db_session, sample_model, sample_channel):
+        """Even with slow response time + error, single failure stays 'slow'."""
         from services.health import record_passive_health
         await record_passive_health(sample_model.id, 3000, "timeout", sample_channel.id, "sk-test")
 
         records = db_session.exec(select(HealthRecord)).all()
-        assert records[0].status == "down"
+        assert records[0].status == "slow"
+
+    @pytest.mark.asyncio
+    async def test_consecutive_errors_reach_down(self, db_session, sample_model, sample_channel):
+        """Only PASSIVE_ERROR_DOWN_THRESHOLD errors in a row mark the model 'down'."""
+        from services.health import record_passive_health
+        from config import PASSIVE_ERROR_DOWN_THRESHOLD
+
+        for _ in range(PASSIVE_ERROR_DOWN_THRESHOLD - 1):
+            await record_passive_health(sample_model.id, 500, "server_error", sample_channel.id, "sk-test")
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "slow"  # below threshold, still routable
+
+        # The threshold-th error tips it over.
+        await record_passive_health(sample_model.id, 500, "server_error", sample_channel.id, "sk-test")
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "down"
+        assert sample_model.consecutive_errors == PASSIVE_ERROR_DOWN_THRESHOLD
+
+    @pytest.mark.asyncio
+    async def test_success_resets_error_counter(self, db_session, sample_model, sample_channel):
+        """Any success clears the consecutive-error count and restores health."""
+        from services.health import record_passive_health
+        await record_passive_health(sample_model.id, 500, "server_error", sample_channel.id, "sk-test")
+        await record_passive_health(sample_model.id, 500, "server_error", sample_channel.id, "sk-test")
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 2
+
+        await record_passive_health(sample_model.id, 200, None, sample_channel.id, "sk-test")
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 0
+        assert sample_model.health_status == "healthy"
 
     @pytest.mark.asyncio
     async def test_model_status_updated(self, db_session, sample_model, sample_channel):

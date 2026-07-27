@@ -1,5 +1,6 @@
 import json
 import time
+import logging
 import httpx
 import hashlib
 import asyncio
@@ -61,6 +62,8 @@ from config import (
 )
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 # Maximum upstream attempts within a single request's fallback chain. Kept in
 # the proxy module (not the router package) because it bounds the HTTP loop.
@@ -791,6 +794,10 @@ async def chat_completions(
     attempted: list[str] = []
     primary_candidates, _ = _single_route_candidates(body.model, session, policy)
     primary_candidate_ids = {candidate.id for candidate in primary_candidates}
+    logger.info(
+        "route resolve request_id=%s route=%s profile=%s candidates=%d stream=%s",
+        request_id, body.model, policy.profile_name, len(candidate_models), bool(body.stream),
+    )
     # The profile may cap total attempts and per-provider attempts to force
     # cross-provider fan-out. Without a profile, keep the legacy ceiling.
     attempt_ceiling = policy.max_attempts or _MAX_UPSTREAM_ATTEMPTS
@@ -822,26 +829,38 @@ async def chat_completions(
     for candidate_index, model in enumerate(candidate_models):
         if upstream_attempts_made >= attempt_ceiling:
             break
+        qualified = f"{model.model_id}@{model.channel_id}"
         if model.channel_id in failed_channels:
+            logger.debug("skip request_id=%s model=%s reason=channel_failed", request_id, qualified)
             continue
         binding = _try_bind_model(model, session)
         if not binding:
+            logger.debug("skip request_id=%s model=%s reason=bind_failed", request_id, qualified)
             continue
         channel, adapter, key = binding
         # Per-provider fan-out cap: once a provider has been tried enough,
         # skip its remaining models so the chain moves to another provider.
         if per_provider_ceiling is not None:
             if attempts_per_provider.get(channel.provider_type, 0) >= per_provider_ceiling:
+                logger.debug(
+                    "skip request_id=%s model=%s reason=per_provider_cap provider=%s cap=%s",
+                    request_id, qualified, channel.provider_type, per_provider_ceiling,
+                )
                 continue
         try:
             _check_model_budget(model, session)
         except ModelBudgetExceeded as exc:
             budget_limited.append(model.model_id)
             budget_retry_after = max(budget_retry_after or 0, exc.retry_after)
+            logger.debug(
+                "skip request_id=%s model=%s reason=budget retry_after=%s",
+                request_id, qualified, exc.retry_after,
+            )
             continue
         slot_key, acquired = await _try_acquire_model_slot(channel, model)
         if not acquired:
             busy_models.append(model.model_id)
+            logger.debug("skip request_id=%s model=%s reason=busy", request_id, qualified)
             continue
         # Record provider-qualified ids so the attempt trace distinguishes
         # which supplier served a model that exists on multiple channels.
@@ -872,6 +891,11 @@ async def chat_completions(
                 continue
 
             if response.status_code == 200:
+                logger.info(
+                    "upstream ok request_id=%s provider=%s model=%s status=200 stream=true ms=%s attempt=%d",
+                    request_id, channel.provider_type, model.model_id,
+                    int((time.monotonic() - start) * 1000), upstream_attempts_made,
+                )
                 return StreamingResponse(
                     _proxy_stream(response, client, model.id, channel.id, key, slot_key),
                     media_type="text/event-stream",
@@ -898,6 +922,11 @@ async def chat_completions(
             await client.aclose()
             _release_model_slot(slot_key)
             ms = int((time.monotonic() - start) * 1000)
+            logger.warning(
+                "upstream fail request_id=%s provider=%s model=%s status=%s ms=%s attempt=%d stream=true",
+                request_id, channel.provider_type, model.model_id,
+                response.status_code, ms, upstream_attempts_made,
+            )
             if response.status_code == 429:
                 last_rate_retry_after = record_rate_limit(model.id, _parse_retry_after(response.headers), session, ms)
                 trigger_event_recheck(model.id, "rate_limited")
@@ -934,6 +963,10 @@ async def chat_completions(
             await record_passive_health(model.id, ms, None, channel.id, key)
             clear_billing_failures(model.id, session)
             clear_rate_limit(model.id, session)
+            logger.info(
+                "upstream ok request_id=%s provider=%s model=%s status=200 ms=%s attempt=%d",
+                request_id, channel.provider_type, model.model_id, ms, upstream_attempts_made,
+            )
             return JSONResponse(
                 content=r.json(),
                 status_code=200,
@@ -951,6 +984,11 @@ async def chat_completions(
                     request_id=request_id,
                 ),
             )
+        logger.warning(
+            "upstream fail request_id=%s provider=%s model=%s status=%s ms=%s attempt=%d",
+            request_id, channel.provider_type, model.model_id,
+            r.status_code, ms, upstream_attempts_made,
+        )
         if r.status_code == 429:
             last_rate_retry_after = record_rate_limit(model.id, _parse_retry_after(r.headers), session, ms)
             trigger_event_recheck(model.id, "rate_limited")
@@ -970,6 +1008,11 @@ async def chat_completions(
         continue
 
     body.model = original_model
+    logger.warning(
+        "route exhausted request_id=%s route=%s attempted=%s busy=%d budget_limited=%d last_status=%s",
+        request_id, original_model, ",".join(attempted) or "(none)",
+        len(busy_models), len(budget_limited), last_upstream_status,
+    )
     if not attempted and busy_models:
         return _make_ac_error(
             503,
