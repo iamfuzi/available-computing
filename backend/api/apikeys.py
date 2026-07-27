@@ -1,7 +1,6 @@
 import secrets
 import hashlib
 import json
-from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends
 from sqlmodel import Session, select
 from pydantic import BaseModel, Field, model_validator

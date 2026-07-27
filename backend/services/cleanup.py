@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from sqlmodel import Session, select, delete
+from sqlmodel import Session, delete
 from database import engine
 from models import HealthRecord
 

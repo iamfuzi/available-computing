@@ -25,7 +25,6 @@ def _get_setting(key: str) -> int:
 
 
 def init_scheduler(get_key_fn=None):
-    from datetime import datetime
     from services.discovery import discover_all_channels
     from services.health import probe_all_stale_models, recover_expired_cooldowns
     from services.cleanup import cleanup_old_health_records
@@ -106,9 +105,6 @@ def init_scheduler(get_key_fn=None):
 
 def refresh_scheduler_intervals():
     """Re-schedule jobs when settings change."""
-    from services.discovery import discover_all_channels
-    from services.health import probe_all_stale_models, recover_expired_cooldowns
-
     discovery_hours = _get_setting("discovery_interval_hours")
     probe_hours = _get_setting("probe_interval_hours")
 

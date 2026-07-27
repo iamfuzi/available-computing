@@ -80,7 +80,6 @@ async def discover_channel(
         if decrypted_key is None:
             from services.crypto import decrypt as _decrypt
             from api.channels import _get_salt
-            import base64
             from config import get_admin_password
             salt = _get_salt(session)
             decrypted_key = _decrypt(channel.api_key_enc, get_admin_password(), salt)
