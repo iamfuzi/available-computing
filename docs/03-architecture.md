@@ -193,6 +193,73 @@ WebSocket `/ws` 推送发现、探测和状态变化事件，前端断线后使�
 
 显式模型只在兼容渠道之间回退；`auto:*` 模型允许系统按能力和偏好选择。流式 Chat 采用逐块转发，避免在服务器端缓冲完整响应。
 
+### 8.1 路由层与服务边界
+
+路由逻辑从 `api/proxy.py` 抽离到独立的 `services/router/` 包，按职责拆分：
+
+| 模块 | 职责 |
+|---|---|
+| `scoring.py` | 健康排序、冷却判断、成功率、路由评分键 |
+| `policy.py` | `RoutingPolicy` 请求体、`EffectiveRoutingPolicy` 合并、硬过滤 |
+| `candidates.py` | 候选池生成、容错匹配、路由解析、绑定 |
+| `profiles.py` | YAML 路由档案加载、校验、鉴权 |
+
+`proxy.py` 保留 HTTP 回退主循环（httpx 调用、流式、健康反馈、信号量），因为它紧耦合网络层。这种拆分让策略、档案和回退算法有独立的演进落点，而不让单文件持续膨胀。
+
+### 8.2 路由档案（Routing Profile）
+
+当一个 AC 实例被多个项目共用时，每个项目可以通过命名档案表达自己的路由约束，而不必在每次请求里重复完整规则。档案是 `profiles/*.yaml`，每个文件一个档案，文件名即档案名：
+
+```yaml
+# profiles/hotspot-classifier.yaml
+task: classification
+objective: latency
+free_only: true
+provider_denylist: [google, gemini]
+model_deny_patterns: [gemini, glm-z1, reasoning]
+max_attempts: 3
+max_attempts_per_provider: 1
+deadline_ms: 45000
+```
+
+调用方在请求体声明 `routing_policy.profile: "hotspot-classifier"`。档案约束作为基线，请求体和 ApiKey 行只能进一步收窄（单调合并），不能放宽。鉴权通过 ApiKey 的 `allowed_profiles` 字段（JSON 数组）：空值表示允许所有档案（个人部署默认），非空则是显式白名单，未授权档案返回 403 `policy_rejected`。
+
+档案是可选的——不声明 `profile` 时，行为与升级前完全一致。
+
+### 8.3 硬过滤与跨供应商回退
+
+档案的 `provider_denylist` 和 `model_deny_patterns` 是**硬过滤**：不满足的候选直接从池中剔除，回退链也无法绕过（每个路由在去重前都会重新过一遍硬过滤）。
+
+`max_attempts` 和 `max_attempts_per_provider` 约束单次请求内的回退行为：
+
+- `max_attempts`：单次请求最多发起的上游尝试数（替代旧的硬编码上限 50）。
+- `max_attempts_per_provider`：同一供应商的最大尝试数。设为 1 时，回退序列强制跨供应商（A → B → C），而不是在同一供应商内耗尽（A → A → A），因为同一供应商的多个模型往往共享配额和故障域。
+
+无档案时，回退行为保持原有上限。
+
+### 8.4 标准错误与可观测性
+
+每次响应（成功和错误）都携带 `X-AC-Request-ID`（`ac_req_<hex>`）。调用方传入同名头时原样回传，实现端到端追踪。错误响应采用统一结构：
+
+```json
+{
+  "error": {
+    "type": "routing_exhausted",
+    "code": "all_candidates_unavailable",
+    "message": "...",
+    "retryable": true,
+    "retry_after": 60,
+    "scope": "routing_profile",
+    "request_id": "ac_req_xxx",
+    "attempted_models": ["provider-a/model-x"]
+  }
+}
+```
+
+标准错误类型：`policy_rejected`、`no_eligible_model`、`rate_limited`、`routing_exhausted`、`deadline_exceeded`、`upstream_invalid_response`。429 和路由耗尽同时写标准 `Retry-After` 头（RFC 7231）和 `X-AC-Retry-After`，让通用 HTTP 客户端无需 AC 专属知识即可退避。
+
+诊断响应头 `X-AC-Attempted-Models`、`X-AC-Attempt-Count`、`X-AC-Selected-Provider` 让调用方在不解析 body 的情况下快速判断路由结果。
+
 ---
 
 ## 9. 数据与安全
@@ -204,7 +271,7 @@ WebSocket `/ws` 推送发现、探测和状态变化事件，前端断线后使�
 | `Channel` | 厂商渠道、加密凭证、来源、合规快照和运行状态 |
 | `Model` | 模型能力、免费证据、健康、验证新鲜度、冷却和参数规模 |
 | `HealthRecord` | 主动/被动检查结果、HTTP 状态、错误原因和检查批次 |
-| `ApiKey` | 认证哈希、供本地管理页查看的加密原值、权限与速率策略 |
+| `ApiKey` | 认证哈希、供本地管理页查看的加密原值、权限与速率策略、可用的路由档案白名单 |
 | `CandidateProvider` | 待审核厂商、证据、准入结论和 YAML 草稿 |
 | `CandidateSourceState` | 社区来源抓取状态和连续失败告警 |
 | `Notification` | 去重的管理员通知及已读/解决状态 |

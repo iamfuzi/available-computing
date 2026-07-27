@@ -1,0 +1,55 @@
+# Routing profile for the hotspot-classifier caller (hotspot-pipeline project).
+#
+# This profile captures the routing constraints that the hotspot classification
+# service previously maintained client-side: free text models only, exclude
+# Google/Gemini and a few model families, and bound the fallback chain so a
+# single request fans out across providers rather than burning one provider's
+# quota. See docs/03-architecture.md "Routing profiles" for the full field
+# reference.
+
+# Semantic task type — reserved for future quality scoring; not yet used to
+# filter candidates but recorded in routing traces.
+task: classification
+
+# Optimization objective. "latency" prioritizes fast-responding candidates;
+# "quality" / "cost" / "balanced" are reserved for future weighting.
+objective: latency
+
+# Only route to free channels. Set false to allow paid models as fallback.
+free_only: true
+
+# Whole-provider exclusions. These are HARD filters: no candidate from a
+# denied provider can enter the pool, and the fallback chain cannot bypass
+# them. Provider ids match channel.provider_type (e.g. openrouter, groq,
+# siliconflow, zhipu, agnes).
+provider_denylist:
+  - google
+  - gemini
+
+# Model-id substring exclusions (case-insensitive). Applied per candidate,
+# also as a hard filter. Use this for model families you never want, regardless
+# of which provider hosts them.
+model_deny_patterns:
+  - gemini
+  - glm-z1
+  - kilo-auto
+  - content-safety
+  - reasoning
+
+# Soft latency target (milliseconds). Candidates whose recent observed latency
+# exceeds this are penalized in scoring but NOT excluded — it is not a hard
+# timeout. The hard timeout is deadline_ms.
+max_observed_latency_ms: 20000
+
+# Fallback budget within a single request. max_attempts caps total upstream
+# tries; max_attempts_per_provider forces the fallback chain to spread across
+# providers (e.g. A -> B -> C) instead of exhausting one provider first
+# (A -> A -> A), since models on the same provider often share quota and
+# failure domains.
+max_attempts: 3
+max_attempts_per_provider: 1
+
+# Hard wall-clock deadline for the whole request including all fallback tries.
+# If the request cannot complete within this budget, AC returns
+# deadline_exceeded rather than making the caller wait indefinitely.
+deadline_ms: 45000

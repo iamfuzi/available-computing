@@ -23,3 +23,8 @@ class ApiKey(SQLModel, table=True):
     rate_limit_rpd: Optional[int] = None
     default_prefer: str = Field(default="latency")
     default_min_context: Optional[int] = None
+    # JSON array of routing-profile names this key may use. None/empty means
+    # "all profiles allowed" (the personal-deployment default). A non-empty
+    # value is an explicit allowlist; requests naming an unlisted profile are
+    # rejected with policy_rejected (403).
+    allowed_profiles: Optional[str] = None

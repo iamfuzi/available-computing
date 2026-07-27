@@ -8,6 +8,7 @@ from pathlib import Path
 
 from database import create_db_and_tables
 from api import auth, channels, models, pool, settings, apikeys, candidates, notifications
+from api.middleware import RequestIdMiddleware
 from api.proxy import router as proxy_router
 from ws.events import router as ws_router, start_cleanup_task
 from services.scheduler import init_scheduler, shutdown_scheduler
@@ -41,6 +42,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Available Computing", lifespan=lifespan)
+
+# Request-id middleware is added AFTER CORS so it runs closer to the route
+# handler (Starlette executes middleware in reverse add order on the way in).
+# This guarantees every response — including errors and SPA fallback — carries
+# a stable X-AC-Request-ID that callers can correlate with server logs.
+app.add_middleware(RequestIdMiddleware)
 
 _cors_origins = os.environ.get("CORS_ORIGINS", "*").split(",")
 app.add_middleware(

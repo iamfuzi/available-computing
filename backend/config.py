@@ -17,6 +17,16 @@ PROVIDERS_PATH = Path(os.environ.get(
     str(Path(__file__).parent.parent / "providers"),
 ))
 
+# Routing profiles: named, reusable routing policies (one YAML file per
+# profile). Profiles let multiple caller projects share one AC instance while
+# each gets a tailored candidate pool, denylist, and fallback budget. Unlike
+# providers/whitelist, profiles are optional — if the directory is empty or
+# missing, all requests simply use the default per-key/per-request policy.
+PROFILES_PATH = Path(os.environ.get(
+    "PROFILES_PATH",
+    str(Path(__file__).parent.parent / "profiles"),
+))
+
 _jwt_secret_file = os.environ.get("JWT_SECRET_FILE")
 if _jwt_secret_file and Path(_jwt_secret_file).exists():
     JWT_SECRET = Path(_jwt_secret_file).read_text().strip()
