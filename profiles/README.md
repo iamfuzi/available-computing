@@ -48,16 +48,13 @@ for the ApiKey-vs-request merge, extended with a profile layer underneath.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `task` | string \| null | null | Semantic task type (`classification`, `summary`, `code`). Reserved for future quality scoring; recorded in traces. |
-| `objective` | enum | `latency` | One of `latency`, `quality`, `cost`, `balanced`. |
-| `free_only` | bool | `true` | Only route to free channels. |
+| `free_only` | bool | `true` | Only route to free channels. Set `false` to admit paid models as a last-resort fallback (a profile-granted escape hatch; the key/request cannot relax it). |
 | `provider_denylist` | list[string] | `[]` | Whole-provider exclusions (hard filter). Values match `channel.provider_type`. |
 | `provider_whitelist` | list[string] | `[]` | Restrict to these providers (intersects the key's whitelist). |
 | `model_deny_patterns` | list[string] | `[]` | Model-id substring exclusions, case-insensitive (hard filter). |
-| `max_observed_latency_ms` | int \| null | null | Soft latency target; penalizes slow candidates in scoring but does not exclude them. |
 | `max_attempts` | int \| null | null | Max upstream tries within one request. |
 | `max_attempts_per_provider` | int \| null | null | Max tries per provider in one request. Set to 1 to force cross-provider fan-out. |
-| `deadline_ms` | int \| null | null | Hard wall-clock deadline for the whole request including fallback. |
+| `deadline_ms` | int \| null | null | Hard wall-clock budget for the whole request. Each upstream try gets at most `deadline_ms / max_attempts` seconds before timing out, so fallback cannot accumulate into a multi-minute hang. |
 
 ## Hard vs soft constraints
 
@@ -65,8 +62,16 @@ for the ApiKey-vs-request merge, extended with a profile layer underneath.
 are **hard filters**: a candidate that violates them is dropped outright, and
 the fallback chain cannot bring it back (every route re-applies the filter).
 
-`max_observed_latency_ms` is a **soft** constraint: it penalizes a candidate's
-score but does not exclude it.
+`deadline_ms` bounds wall-clock time: it sets the per-try upstream timeout so
+the total fallback sequence stays within budget.
+
+## Fields that look useful but are not (yet) supported
+
+`objective`, `task`, and `max_observed_latency_ms` were considered but removed
+because they were never enforced. If a profile sets them, AC rejects it at
+load time with a clear error rather than silently ignoring the constraint —
+an unenforced config field is worse than a missing one. They may return in a
+future version once the scoring work to honour them is built.
 
 ## Example
 

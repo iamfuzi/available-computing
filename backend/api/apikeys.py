@@ -37,6 +37,9 @@ class ApiKeyCreate(BaseModel):
     provider_blacklist: list[str] = Field(default_factory=list)
     rate_limit: KeyRateLimit = Field(default_factory=KeyRateLimit)
     default_routing_policy: DefaultRoutingPolicy = Field(default_factory=DefaultRoutingPolicy)
+    # Routing profiles this key may use. Empty = all profiles allowed (the
+    # personal-deployment default); non-empty is an explicit allowlist.
+    allowed_profiles: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_provider_policy(self):
@@ -53,6 +56,7 @@ class ApiKeyUpdate(BaseModel):
     provider_blacklist: Optional[list[str]] = None
     rate_limit: Optional[KeyRateLimit] = None
     default_routing_policy: Optional[DefaultRoutingPolicy] = None
+    allowed_profiles: Optional[list[str]] = None
 
 
 def _json_list(value: Optional[str]) -> list[str]:
@@ -72,6 +76,7 @@ def _policy_dict(key: ApiKey) -> dict:
             "prefer": key.default_prefer,
             "min_context": key.default_min_context,
         },
+        "allowed_profiles": _json_list(key.allowed_profiles),
     }
 
 
@@ -121,6 +126,7 @@ def create_api_key(
         rate_limit_rpd=body.rate_limit.rpd,
         default_prefer=body.default_routing_policy.prefer,
         default_min_context=body.default_routing_policy.min_context,
+        allowed_profiles=json.dumps(body.allowed_profiles) if body.allowed_profiles else None,
     )
     session.add(key)
     session.commit()
@@ -161,6 +167,10 @@ def update_api_key(
     if body.default_routing_policy is not None:
         k.default_prefer = body.default_routing_policy.prefer
         k.default_min_context = body.default_routing_policy.min_context
+    if body.allowed_profiles is not None:
+        # Empty list = "all profiles allowed" (clears the allowlist). Stored
+        # as NULL so is_profile_authorized treats it as the open default.
+        k.allowed_profiles = json.dumps(body.allowed_profiles) if body.allowed_profiles else None
     overlap = set(_json_list(k.provider_whitelist)) & set(_json_list(k.provider_blacklist))
     if overlap:
         raise HTTPException(422, "providers cannot be both allowed and blocked")

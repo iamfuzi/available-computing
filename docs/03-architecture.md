@@ -212,8 +212,6 @@ WebSocket `/ws` 推送发现、探测和状态变化事件，前端断线后使�
 
 ```yaml
 # profiles/hotspot-classifier.yaml
-task: classification
-objective: latency
 free_only: true
 provider_denylist: [google, gemini]
 model_deny_patterns: [gemini, glm-z1, reasoning]
@@ -230,10 +228,16 @@ deadline_ms: 45000
 
 档案的 `provider_denylist` 和 `model_deny_patterns` 是**硬过滤**：不满足的候选直接从池中剔除，回退链也无法绕过（每个路由在去重前都会重新过一遍硬过滤）。
 
+`free_only` 同样是硬过滤，但方向相反：默认 `true`（只选免费模型，保持旧行为）；只有档案显式设 `false` 时才允许付费模型作为兜底进入候选池。这是一个**档案授予的逃生口**——ApiKey 和请求体不能放宽它（付费通道的开启必须由服务端档案决定，而非调用方）。
+
 `max_attempts` 和 `max_attempts_per_provider` 约束单次请求内的回退行为：
 
 - `max_attempts`：单次请求最多发起的上游尝试数（替代旧的硬编码上限 50）。
 - `max_attempts_per_provider`：同一供应商的最大尝试数。设为 1 时，回退序列强制跨供应商（A → B → C），而不是在同一供应商内耗尽（A → A → A），因为同一供应商的多个模型往往共享配额和故障域。
+
+`deadline_ms` 是硬性总时限：每次上游调用的超时被设为 `deadline_ms / max_attempts` 秒（下限 5 秒、上限 120 秒），因此 N 次回退不会累积成数分钟挂起。无档案时沿用 120 秒硬编码超时。
+
+**只声明未实现的字段会被拒绝**：`objective`、`task`、`max_observed_latency_ms` 曾被考虑但因未接入而被移除。档案里若出现这些字段，加载时会明确报错，而不是静默忽略——一个不生效的配置项比缺失的配置项危害更大。
 
 无档案时，回退行为保持原有上限。
 

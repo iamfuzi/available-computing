@@ -40,19 +40,18 @@ from config import PROFILES_PATH
 class RoutingProfile:
     """A reusable, named set of routing constraints.
 
-    All fields are optional; a profile may express as few or as many
-    constraints as it needs. ``max_attempts`` / ``max_attempts_per_provider``
-    bound the in-request fallback chain (see services.router.fallback).
+    Only fields that are actually enforced by the router live here. Fields
+    that were considered but not implemented (objective, task,
+    max_observed_latency_ms) were removed rather than left as silent no-ops —
+    an unenforced config field is worse than a missing one because it misleads
+    the caller into thinking their constraint took effect.
     """
 
     name: str
-    task: Optional[str] = None
-    objective: str = "latency"
     free_only: bool = True
     provider_denylist: tuple[str, ...] = ()
     provider_whitelist: tuple[str, ...] = ()
     model_deny_patterns: tuple[str, ...] = ()
-    max_observed_latency_ms: Optional[int] = None
     max_attempts: Optional[int] = None
     max_attempts_per_provider: Optional[int] = None
     deadline_ms: Optional[int] = None
@@ -67,7 +66,10 @@ class RoutingProfile:
         return any(pat.lower() in lower for pat in self.model_deny_patterns)
 
 
-_VALID_OBJECTIVES = {"latency", "quality", "cost", "balanced"}
+# Fields that used to exist but were removed because they were not enforced.
+# Listing them lets us reject them explicitly at load time with a clear message
+# instead of silently ignoring a constraint the caller believes is active.
+_REMOVED_FIELDS = {"objective", "task", "max_observed_latency_ms"}
 
 # Module-level registry, populated at import time. Mirrors the
 # adapters/registry.py pattern: load once, fail fast on bad config.
@@ -83,6 +85,15 @@ def _parse_profile(name: str, raw: dict) -> RoutingProfile:
     if not isinstance(raw, dict):
         raise ValueError(f"profile '{name}' must be a mapping, got {type(raw).__name__}")
 
+    # Reject removed fields loudly. A caller who sets `objective: quality`
+    # expects it to influence scoring; silently ignoring it would be a bug.
+    removed_present = _REMOVED_FIELDS & set(raw.keys())
+    if removed_present:
+        raise ValueError(
+            f"profile '{name}' uses removed field(s) {sorted(removed_present)}; "
+            f"these were never enforced — remove them (planned for a future version)"
+        )
+
     def _as_str_tuple(key: str) -> tuple[str, ...]:
         value = raw.get(key)
         if value is None:
@@ -91,34 +102,21 @@ def _parse_profile(name: str, raw: dict) -> RoutingProfile:
             raise ValueError(f"profile '{name}'.{key} must be a list of strings")
         return tuple(value)
 
-    objective = raw.get("objective", "latency")
-    if objective not in _VALID_OBJECTIVES:
-        raise ValueError(
-            f"profile '{name}'.objective must be one of {sorted(_VALID_OBJECTIVES)}, got {objective!r}"
-        )
-
     free_only = raw.get("free_only", True)
     if not isinstance(free_only, bool):
         raise ValueError(f"profile '{name}'.free_only must be a boolean")
 
-    for int_key in ("max_observed_latency_ms", "max_attempts", "max_attempts_per_provider", "deadline_ms"):
+    for int_key in ("max_attempts", "max_attempts_per_provider", "deadline_ms"):
         val = raw.get(int_key)
         if val is not None and (not isinstance(val, int) or val <= 0):
             raise ValueError(f"profile '{name}'.{int_key} must be a positive integer or null")
 
-    task = raw.get("task")
-    if task is not None and not isinstance(task, str):
-        raise ValueError(f"profile '{name}'.task must be a string or null")
-
     return RoutingProfile(
         name=name,
-        task=task,
-        objective=objective,
         free_only=free_only,
         provider_denylist=_as_str_tuple("provider_denylist"),
         provider_whitelist=_as_str_tuple("provider_whitelist"),
         model_deny_patterns=_as_str_tuple("model_deny_patterns"),
-        max_observed_latency_ms=raw.get("max_observed_latency_ms"),
         max_attempts=raw.get("max_attempts"),
         max_attempts_per_provider=raw.get("max_attempts_per_provider"),
         deadline_ms=raw.get("deadline_ms"),

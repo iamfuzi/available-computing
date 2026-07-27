@@ -4,18 +4,10 @@
 # service previously maintained client-side: free text models only, exclude
 # Google/Gemini and a few model families, and bound the fallback chain so a
 # single request fans out across providers rather than burning one provider's
-# quota. See docs/03-architecture.md "Routing profiles" for the full field
-# reference.
+# quota. See profiles/README.md for the full field reference.
 
-# Semantic task type — reserved for future quality scoring; not yet used to
-# filter candidates but recorded in routing traces.
-task: classification
-
-# Optimization objective. "latency" prioritizes fast-responding candidates;
-# "quality" / "cost" / "balanced" are reserved for future weighting.
-objective: latency
-
-# Only route to free channels. Set false to allow paid models as fallback.
+# Only route to free channels. Set false to allow paid models as a last-resort
+# fallback (a paid-model escape hatch granted by the profile, not by callers).
 free_only: true
 
 # Whole-provider exclusions. These are HARD filters: no candidate from a
@@ -36,11 +28,6 @@ model_deny_patterns:
   - content-safety
   - reasoning
 
-# Soft latency target (milliseconds). Candidates whose recent observed latency
-# exceeds this are penalized in scoring but NOT excluded — it is not a hard
-# timeout. The hard timeout is deadline_ms.
-max_observed_latency_ms: 20000
-
 # Fallback budget within a single request. max_attempts caps total upstream
 # tries; max_attempts_per_provider forces the fallback chain to spread across
 # providers (e.g. A -> B -> C) instead of exhausting one provider first
@@ -49,7 +36,8 @@ max_observed_latency_ms: 20000
 max_attempts: 3
 max_attempts_per_provider: 1
 
-# Hard wall-clock deadline for the whole request including all fallback tries.
-# If the request cannot complete within this budget, AC returns
-# deadline_exceeded rather than making the caller wait indefinitely.
+# Hard wall-clock deadline for the whole request. Each upstream try gets at
+# most deadline_ms / max_attempts seconds before timing out, so three fallback
+# tries cannot accumulate into a multi-minute hang. If the deadline cannot be
+# met, AC fails fast instead of making the caller wait.
 deadline_ms: 45000

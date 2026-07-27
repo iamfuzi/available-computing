@@ -55,8 +55,9 @@ class EffectiveRoutingPolicy:
     """Fully-merged, immutable routing policy ready for candidate filtering.
 
     The ``model_deny_patterns`` / ``max_attempts`` / ``max_attempts_per_provider``
-    fields are populated only when a routing profile is in effect; they default
-    to empty/None so callers that never use profiles see unchanged behaviour.
+    / ``free_only`` / ``deadline_ms`` fields are populated only when a routing
+    profile is in effect; they default to the legacy behaviour so callers that
+    never use profiles see no change.
     """
 
     provider_whitelist: frozenset[str]
@@ -64,10 +65,15 @@ class EffectiveRoutingPolicy:
     min_context: int | None
     prefer: str
     fallback_chain: tuple[str, ...]
-    # Profile-sourced extensions (stage 3/4). Empty/None when no profile.
+    # Profile-sourced extensions. Empty/None/default when no profile.
     model_deny_patterns: frozenset[str] = frozenset()
     max_attempts: int | None = None
     max_attempts_per_provider: int | None = None
+    # free_only defaults True to preserve the legacy "free pool only" behaviour.
+    # A profile may set it False to admit paid models as fallback; the key and
+    # request body cannot relax it (a paid-model escape hatch is profile-granted).
+    free_only: bool = True
+    deadline_ms: int | None = None
     profile_name: str | None = None
 
 
@@ -103,6 +109,8 @@ def effective_routing_policy(
     deny_patterns: set[str] = set()
     max_attempts: int | None = None
     max_attempts_per_provider: int | None = None
+    free_only = True  # legacy default; only a profile can relax this
+    deadline_ms: int | None = None
     profile_name: str | None = None
 
     # Layer 1: profile baseline.
@@ -118,6 +126,10 @@ def effective_routing_policy(
                 whitelist = set(profile.provider_whitelist)
         max_attempts = profile.max_attempts
         max_attempts_per_provider = profile.max_attempts_per_provider
+        # free_only / deadline_ms are profile-granted and cannot be widened by
+        # the key or request body.
+        free_only = profile.free_only
+        deadline_ms = profile.deadline_ms
 
     # Layer 2: ApiKey baseline.
     key_min_context = api_key.default_min_context if api_key else None
@@ -138,6 +150,8 @@ def effective_routing_policy(
         model_deny_patterns=frozenset(deny_patterns),
         max_attempts=max_attempts,
         max_attempts_per_provider=max_attempts_per_provider,
+        free_only=free_only,
+        deadline_ms=deadline_ms,
         profile_name=profile_name,
     )
 

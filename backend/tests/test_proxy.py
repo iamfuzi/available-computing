@@ -669,7 +669,7 @@ class TestAutoRouting:
         assert posted_models == ["first-free", "second-free"]
         assert resp.headers["X-AC-Route"] == "auto:text"
         assert resp.headers["X-AC-Selected-Model"] == "second-free"
-        assert resp.headers["X-AC-Attempted-Models"] == "first-free,second-free"
+        assert resp.headers["X-AC-Attempted-Models"] == "openrouter/first-free,openrouter/second-free"
         assert resp.headers["X-AC-Fallback-Count"] == "1"
         trigger_recheck.assert_called_once_with(first.id, "rate_limited")
         db_session.refresh(first)
@@ -716,7 +716,7 @@ class TestAutoRouting:
         assert body["error"]["code"] == "all_candidates_rate_limited"
         assert body["error"]["retry_after"] == 45
         assert resp.headers["X-AC-Retry-After"] == "45"
-        assert resp.headers["X-AC-Attempted-Models"] == "only-free"
+        assert resp.headers["X-AC-Attempted-Models"] == "openrouter/only-free"
 
     @pytest.mark.asyncio
     async def test_auto_text_skips_busy_model(self, app_client, auth_headers, db_session, sample_channel):
@@ -781,7 +781,7 @@ class TestAutoRouting:
         assert resp.status_code == 200
         assert posted_models == ["busy-second"]
         assert resp.headers["X-AC-Selected-Model"] == "busy-second"
-        assert resp.headers["X-AC-Attempted-Models"] == "busy-second"
+        assert resp.headers["X-AC-Attempted-Models"] == "openrouter/busy-second"
 
     @pytest.mark.asyncio
     async def test_auto_text_all_busy_has_structured_error(self, app_client, auth_headers, db_session, sample_channel):

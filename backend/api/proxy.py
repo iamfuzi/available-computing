@@ -611,13 +611,24 @@ def ac_status(
 
 @router.post("/ac/self-test")
 def ac_self_test(
+    request: Request,
     body: SelfTestRequest | None = None,
     session: Session = Depends(get_session),
     auth=Depends(verify_token_or_apikey),
 ):
-    """Non-consuming integration self-test for third-party clients."""
+    """Non-consuming integration self-test for third-party clients.
+
+    Resolves the routing profile (if any) the same way the chat endpoint
+    does, so a caller can verify "this key + this profile actually yields a
+    routable candidate" without consuming upstream quota.
+    """
     route = (body.model if body else "auto:text")
-    policy = _effective_routing_policy(auth, body.routing_policy if body else None)
+    request_id = get_request_id(request)
+    profile, profile_error = _resolve_profile(auth, body, request_id)
+    if profile_error is not None:
+        # _resolve_profile already built a complete JSONResponse; return it as-is.
+        return profile_error
+    policy = _effective_routing_policy(auth, body.routing_policy if body else None, profile)
     candidates, error = _request_candidate_models(route, session, policy)
     if error:
         return {
@@ -784,6 +795,15 @@ async def chat_completions(
     # cross-provider fan-out. Without a profile, keep the legacy ceiling.
     attempt_ceiling = policy.max_attempts or _MAX_UPSTREAM_ATTEMPTS
     per_provider_ceiling = policy.max_attempts_per_provider
+    # Per-try upstream timeout derived from the profile deadline. Split the
+    # deadline evenly across the attempt budget so N fallback tries cannot
+    # accumulate into a multi-minute hang. Without a deadline the legacy 120s
+    # ceiling applies. Floor at 5s so a tight deadline still lets a request
+    # complete; cap at 120s to preserve the legacy upper bound.
+    if policy.deadline_ms:
+        per_try_timeout = max(5.0, min(120.0, policy.deadline_ms / 1000.0 / attempt_ceiling))
+    else:
+        per_try_timeout = 120.0
     attempts_per_provider: dict[str, int] = {}
     original_model = body.model
     last_rate_retry_after: int | None = None
@@ -823,7 +843,9 @@ async def chat_completions(
         if not acquired:
             busy_models.append(model.model_id)
             continue
-        attempted.append(model.model_id)
+        # Record provider-qualified ids so the attempt trace distinguishes
+        # which supplier served a model that exists on multiple channels.
+        attempted.append(f"{channel.provider_type}/{model.model_id}")
         upstream_attempts_made += 1
         attempts_per_provider[channel.provider_type] = (
             attempts_per_provider.get(channel.provider_type, 0) + 1
@@ -837,7 +859,7 @@ async def chat_completions(
 
         start = time.monotonic()
         if body.stream:
-            client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
+            client = httpx.AsyncClient(timeout=httpx.Timeout(per_try_timeout, connect=10.0))
             req = client.build_request("POST", url, json=payload, headers=headers)
             try:
                 response = await client.send(req, stream=True)
@@ -897,7 +919,7 @@ async def chat_completions(
 
         r = None
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=per_try_timeout) as client:
                 r = await client.post(url, json=payload, headers=headers)
             ms = int((time.monotonic() - start) * 1000)
         except httpx.HTTPError:

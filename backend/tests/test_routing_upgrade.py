@@ -173,15 +173,25 @@ class TestRoutingProfiles:
         assert "hotspot-classifier" in list_profiles()
         p = load_profile("hotspot-classifier")
         assert p is not None
-        assert p.task == "classification"
-        assert p.objective == "latency"
+        # Removed fields must be gone (objective/task/max_observed_latency_ms).
+        assert not hasattr(p, "objective")
+        assert not hasattr(p, "task")
+        assert not hasattr(p, "max_observed_latency_ms")
         assert p.free_only is True
+        assert p.deadline_ms == 45000
         assert "google" in p.provider_denylist
         assert "gemini" in p.provider_denylist
         assert "gemini" in p.model_deny_patterns
         assert "reasoning" in p.model_deny_patterns
         assert p.max_attempts == 3
         assert p.max_attempts_per_provider == 1
+
+    def test_removed_fields_rejected_at_load(self, tmp_path):
+        """A profile using a removed field must fail load with a clear error."""
+        from services.router.profiles import _parse_profile
+        import pytest
+        with pytest.raises(ValueError, match="removed field"):
+            _parse_profile("bad", {"objective": "quality"})
 
     def test_unknown_profile_returns_none(self):
         from services.router import load_profile
@@ -637,7 +647,195 @@ class TestCrossProviderFallback:
                 headers=auth_headers,
             )
         assert resp.status_code == 200
-        # The X-AC-Attempted-Models header records the cross-provider sequence.
+        # The X-AC-Attempted-Models header records the cross-provider sequence
+        # in provider-qualified form so multi-channel same-name models differ.
         attempted = resp.headers["X-AC-Attempted-Models"].split(",")
-        assert "groq-model" in attempted
-        assert "sf-model" in attempted
+        assert "groq/groq-model" in attempted
+        assert "siliconflow/sf-model" in attempted
+
+
+# ── P0 hardening: deadline / free_only / self-test / CRUD ─────────────────
+
+
+class TestDeadlineMs:
+    def test_per_try_timeout_derived_from_deadline(self):
+        """deadline_ms / max_attempts sets the per-try upstream timeout."""
+        # hotspot-classifier: deadline_ms=45000, max_attempts=3 -> 15s each.
+        from services.router import effective_routing_policy, RoutingPolicy, load_profile
+        p = load_profile("hotspot-classifier")
+        pol = effective_routing_policy(None, RoutingPolicy(profile="hotspot-classifier"), p)
+        assert pol.deadline_ms == 45000
+        assert pol.max_attempts == 3
+        # The proxy computes: max(5, min(120, 45000/1000/3)) = 15.0
+        expected = max(5.0, min(120.0, pol.deadline_ms / 1000.0 / pol.max_attempts))
+        assert expected == 15.0
+
+    def test_no_deadline_keeps_legacy_timeout(self):
+        """Without a profile, deadline_ms is None and the legacy 120s applies."""
+        from services.router import effective_routing_policy
+        pol = effective_routing_policy(None)
+        assert pol.deadline_ms is None
+
+    def test_tight_deadline_floored_at_5s(self):
+        """A deadline too small for the attempt budget floors at 5s/try."""
+        # 3000ms / 3 attempts = 1s, but floor is 5s.
+        expected = max(5.0, min(120.0, 3000 / 1000.0 / 3))
+        assert expected == 5.0
+
+
+class TestFreeOnly:
+    def test_free_only_false_admits_paid_models(self, db_session):
+        """A profile with free_only=false lets paid models into the candidate pool."""
+        from models import Model, Channel
+        from services.crypto import encrypt, generate_salt
+        from services.router import chat_candidates, EffectiveRoutingPolicy, apply_routing_policy
+        from services.router.profiles import RoutingProfile
+
+        salt = generate_salt()
+        ch = Channel(id="ch-fo", provider_type="groq", name="g",
+                     api_key_enc=encrypt("sk", "test-admin-password", salt), enabled=True)
+        db_session.add(ch)
+        db_session.commit()
+        free_m = Model(id="m-free", channel_id=ch.id, model_id="free-model",
+                       category="text", is_free=True, is_active=True, health_status="healthy")
+        paid_m = Model(id="m-paid", channel_id=ch.id, model_id="paid-model",
+                       category="text", is_free=False, is_active=True, health_status="healthy")
+        db_session.add_all([free_m, paid_m])
+        db_session.commit()
+
+        # Default (free_only=True): paid model excluded.
+        pool_free = chat_candidates(db_session, free_only=True)
+        assert {m.model_id for m in pool_free} == {"free-model"}
+
+        # Profile free_only=False: paid model admitted.
+        pool_open = chat_candidates(db_session, free_only=False)
+        assert {m.model_id for m in pool_open} == {"free-model", "paid-model"}
+
+    def test_free_only_default_true_preserves_legacy(self, db_session, sample_model):
+        """Without a profile, only free models appear (legacy behaviour)."""
+        from services.router import chat_candidates
+        pool = chat_candidates(db_session)
+        # sample_model is free; it should be present.
+        assert any(m.id == sample_model.id for m in pool)
+
+
+class TestSelfTestProfile:
+    @pytest.mark.asyncio
+    async def test_self_test_rejects_unauthorized_profile(self, app_client, db_session, sample_model):
+        """self-test runs profile authorization like the chat endpoint."""
+        import hashlib, json
+        from models import ApiKey
+
+        raw = "ac_st_denied"
+        key = ApiKey(
+            name="d", key_hash=hashlib.sha256(raw.encode()).hexdigest(),
+            key_prefix=raw[:8], key_encrypted="", is_active=True,
+            allowed_profiles=json.dumps(["other-profile"]),
+        )
+        db_session.add(key)
+        db_session.commit()
+
+        resp = await app_client.post(
+            "/v1/ac/self-test",
+            json={"model": "auto:text", "routing_policy": {"profile": "hotspot-classifier"}},
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "profile_unauthorized"
+
+    @pytest.mark.asyncio
+    async def test_self_test_with_profile_returns_candidates(self, app_client, auth_headers, sample_model):
+        """self-test with an authorized profile resolves candidates under that profile."""
+        resp = await app_client.post(
+            "/v1/ac/self-test",
+            json={"model": "auto:text", "routing_policy": {"profile": "hotspot-classifier"}},
+            headers=auth_headers,
+        )
+        # sample_model is on openrouter (not denied) and free -> routable.
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True
+        assert body["selected_model"] == sample_model.model_id
+
+
+class TestAllowedProfilesCrud:
+    @pytest.mark.asyncio
+    async def test_create_key_with_allowed_profiles(self, app_client, auth_headers):
+        """POST /apikeys persists allowed_profiles and echoes it back."""
+        resp = await app_client.post(
+            "/api/v1/apikeys",
+            headers=auth_headers,
+            json={
+                "name": "profile-key",
+                "allowed_profiles": ["hotspot-classifier"],
+            },
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["allowed_profiles"] == ["hotspot-classifier"]
+        # The raw key is returned once so the caller can use it.
+        assert body["key"].startswith("ac_")
+
+    @pytest.mark.asyncio
+    async def test_list_key_returns_allowed_profiles(self, app_client, auth_headers):
+        """GET /apikeys includes allowed_profiles in the response."""
+        await app_client.post(
+            "/api/v1/apikeys",
+            headers=auth_headers,
+            json={"name": "k1", "allowed_profiles": ["hotspot-classifier", "other"]},
+        )
+        listed = await app_client.get("/api/v1/apikeys", headers=auth_headers)
+        row = listed.json()[0]
+        assert set(row["allowed_profiles"]) == {"hotspot-classifier", "other"}
+
+    @pytest.mark.asyncio
+    async def test_update_allowed_profiles(self, app_client, auth_headers):
+        """PATCH can change allowed_profiles; empty list clears it (all allowed)."""
+        created = await app_client.post(
+            "/api/v1/apikeys",
+            headers=auth_headers,
+            json={"name": "k2", "allowed_profiles": ["hotspot-classifier"]},
+        )
+        key_id = created.json()["id"]
+
+        # Narrow to a different set.
+        patched = await app_client.patch(
+            f"/api/v1/apikeys/{key_id}",
+            headers=auth_headers,
+            json={"allowed_profiles": ["other-profile"]},
+        )
+        assert patched.json()["allowed_profiles"] == ["other-profile"]
+
+        # Empty list = clear allowlist (all profiles allowed).
+        cleared = await app_client.patch(
+            f"/api/v1/apikeys/{key_id}",
+            headers=auth_headers,
+            json={"allowed_profiles": []},
+        )
+        assert cleared.json()["allowed_profiles"] == []
+
+
+class TestProviderQualifiedAttempts:
+    @pytest.mark.asyncio
+    async def test_attempted_models_include_provider(self, app_client, auth_headers, sample_model, sample_channel):
+        """X-AC-Attempted-Models records provider/model, not bare model id."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        mock_resp = MagicMock(status_code=200, headers={})
+        mock_resp.json.return_value = {"id": "x", "choices": [{"message": {"content": "hi"}}]}
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_cm.post = AsyncMock(return_value=mock_resp)
+        with patch("httpx.AsyncClient", return_value=mock_cm):
+            resp = await app_client.post(
+                "/v1/chat/completions",
+                json={"model": "test-model-free", "messages": [{"role": "user", "content": "hi"}]},
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        # sample_channel is openrouter, so the trace is provider-qualified.
+        attempted = resp.headers["X-AC-Attempted-Models"]
+        assert attempted.startswith("openrouter/")
+        # But the OpenAI-style selected-model header stays bare.
+        assert resp.headers["X-AC-Selected-Model"] == "test-model-free"

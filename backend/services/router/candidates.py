@@ -81,14 +81,21 @@ def normalize_model_id(model_id: str) -> str:
     return "-".join(parts)
 
 
-def chat_candidates(session: Session):
-    """All active, free, routeable chat models not in rate-limit cooldown."""
-    rows = session.exec(
+def chat_candidates(session: Session, free_only: bool = True):
+    """All active, routeable chat models not in rate-limit cooldown.
+
+    ``free_only`` defaults True (the legacy free-pool behaviour). A profile
+    with ``free_only: false`` passes False here to admit paid models as
+    fallback — the only path that can widen the pool beyond free models.
+    """
+    stmt = (
         select(Model)
         .where(Model.is_active == True)
-        .where(Model.is_free == True)
         .where(Model.health_status.in_(["healthy", "slow"]))
-    ).all()
+    )
+    if free_only:
+        stmt = stmt.where(Model.is_free == True)
+    rows = session.exec(stmt).all()
     return [m for m in rows if scoring.is_pool_eligible(m, session) and not scoring.is_cooling_down(m)]
 
 
@@ -96,20 +103,23 @@ def category_candidates(
     session: Session,
     category: str,
     policy: EffectiveRoutingPolicy | None = None,
+    free_only: bool = True,
 ):
-    """All active, free, routable models of a category (e.g. image, embedding).
+    """All active, routable models of a category (e.g. image, embedding).
 
     Unlike ``chat_candidates`` this does NOT exclude the non-chat categories —
     it scopes to exactly one. Successful generation probes commonly exceed the
     fast-response threshold, so both healthy and slow models remain routable.
     """
-    rows = session.exec(
+    stmt = (
         select(Model)
         .where(Model.is_active == True)
-        .where(Model.is_free == True)
         .where(Model.health_status.in_(["healthy", "slow"]))
         .where(Model.category == category)
-    ).all()
+    )
+    if free_only:
+        stmt = stmt.where(Model.is_free == True)
+    rows = session.exec(stmt).all()
     candidates = [m for m in rows if not scoring.is_cooling_down(m)]
     if policy:
         candidates = apply_routing_policy(candidates, policy, session)
@@ -184,8 +194,8 @@ def suggest_models(model_id: str, all_models: list[Model], limit: int = 5) -> li
     return out
 
 
-def auto_candidate_models(kind: str, session: Session) -> list[Model]:
-    chat = chat_candidates(session)
+def auto_candidate_models(kind: str, session: Session, free_only: bool = True) -> list[Model]:
+    chat = chat_candidates(session, free_only=free_only)
     text_candidates = [m for m in chat if scoring.is_generic_text_candidate(m)]
     generic_candidates = text_candidates or chat
     if kind == "smart":
@@ -209,10 +219,11 @@ def single_route_candidates(
     session: Session,
     policy: EffectiveRoutingPolicy,
 ) -> tuple[list[Model], str | None]:
+    free_only = policy.free_only
     auto_match = AUTO_RE.match(model_id)
     if auto_match:
         kind = auto_match.group(1)
-        candidates = auto_candidate_models(kind, session)
+        candidates = auto_candidate_models(kind, session, free_only=free_only)
         candidates = apply_routing_policy(
             candidates,
             policy,
@@ -223,7 +234,7 @@ def single_route_candidates(
             return [], f"No verified available models for {model_id}"
         return candidates, None
 
-    pool = apply_routing_policy(chat_candidates(session), policy, session)
+    pool = apply_routing_policy(chat_candidates(session, free_only=free_only), policy, session)
     candidates = matching_models(model_id, pool, session)
     candidates = apply_routing_policy(candidates, policy, session)
     if not candidates:
