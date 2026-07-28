@@ -58,6 +58,8 @@ open http://localhost:8080
 
 登录后在 **设置 → API 密钥** 创建一个密钥（`ac_` 开头），然后用它调用：
 
+> 第三方应用的完整接入流程（Key 权限、命名 profile、自检、错误重试和诊断 Header）见 [应用接入手册](./docs/06-integration.md)。服务端 profile 的配置方式见 [Routing Profiles](./profiles/README.md)。
+
 ### Python（OpenAI SDK）
 
 ```python
@@ -112,6 +114,17 @@ curl http://localhost:8080/v1/chat/completions \
 | `auto:text` | 自动选择最快的文本对话模型 |
 | `auto:vision` | 自动选择多模态理解模型 |
 | `auto:code` | 自动选择代码生成模型 |
+
+第三方应用建议使用独立 Key 和 `auto:*`，先调用 `/v1/ac/self-test` 自检，再发起真实请求。若 AC 管理者给应用分配了命名 profile，请在自检和业务请求中同时传入：
+
+```json
+{
+  "model": "auto:text",
+  "routing_policy": {"profile": "your-profile"}
+}
+```
+
+一次请求内部的有限候选切换由 AC 完成；调用方只需按 `Retry-After` 对终态 429/503 做少量重试，并记录 `X-AC-Request-ID` 用于排查。
 
 ## 核心特性
 
@@ -259,6 +272,8 @@ docker compose up -d
 
 Create an API key (`ac_` prefix) in **Settings → API Keys**, then:
 
+> For the complete third-party integration contract—key scoping, named profiles, self-test, retries, and diagnostic headers—see the [Application Integration Guide](./docs/06-integration.md). Profile administrators should also read [Routing Profiles](./profiles/README.md).
+
 ```python
 from openai import OpenAI
 
@@ -288,6 +303,8 @@ client.chat.completions.create(
 | `auto:text` | Auto-select fastest text model |
 | `auto:vision` | Auto-select multimodal model |
 | `auto:code` | Auto-select code generation model |
+
+Give each application its own key and prefer an `auto:*` route. Run `/v1/ac/self-test` before the first real request. If the AC administrator assigned a named profile, include the same `routing_policy.profile` in both self-test and business requests. AC performs bounded candidate fallback internally; callers should only retry terminal 429/503 responses a limited number of times, honor `Retry-After`, and retain `X-AC-Request-ID` for diagnostics.
 
 ## Key Features
 

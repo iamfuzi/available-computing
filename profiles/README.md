@@ -6,6 +6,9 @@ projects share one AC instance while each gets a tailored candidate pool,
 denylist, and fallback budget — without repeating the full constraint set in
 each request body.
 
+For the caller-facing setup, SDK examples, errors, retries, and diagnostics,
+see the [Application Integration Guide](../docs/06-integration.md).
+
 ## How it works
 
 1. Put one YAML file per profile in this directory. The filename (without
@@ -28,6 +31,10 @@ may use:
   `policy_rejected`.
 
 JWT/admin requests bypass profile authorization.
+
+For an application-specific key, prefer a non-empty `allowed_profiles`
+allowlist. The empty default is convenient for a personal instance, but it
+also lets that key select any profile added later.
 
 ## Merge rule (monotone narrowing)
 
@@ -64,6 +71,43 @@ the fallback chain cannot bring it back (every route re-applies the filter).
 
 `deadline_ms` bounds wall-clock time: it sets the per-try upstream timeout so
 the total fallback sequence stays within budget.
+
+## Caller contract
+
+The AC administrator gives the caller a base URL, an `ac_` API key, a route,
+and the profile name. The caller first validates the exact combination:
+
+```bash
+export AC_BASE_URL="https://ai.example.com/v1"
+export AC_API_KEY="ac_your_key"
+export AC_ROUTING_PROFILE="your-profile"
+
+curl "$AC_BASE_URL/ac/self-test" \
+  -H "Authorization: Bearer $AC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"auto:text\",
+    \"routing_policy\": {\"profile\": \"$AC_ROUTING_PROFILE\"}
+  }"
+```
+
+The business request must carry the same profile:
+
+```bash
+curl "$AC_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $AC_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"auto:text\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}],
+    \"routing_policy\": {\"profile\": \"$AC_ROUTING_PROFILE\"}
+  }"
+```
+
+An unknown profile returns `404 profile_not_found`; a key outside the
+allowlist returns `403 profile_unauthorized`. Profile files are loaded by the
+AC process, so restart AC after adding or changing one. Callers should not
+duplicate the profile's provider/model fallback logic locally.
 
 ## Fields that look useful but are not (yet) supported
 

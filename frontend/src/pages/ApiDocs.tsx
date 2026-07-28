@@ -317,7 +317,9 @@ curl ${baseUrl}/ac/models \\
   -H "Authorization: Bearer ${keyDisplay}"
 
 curl ${baseUrl}/ac/self-test \\
-  -H "Authorization: Bearer ${keyDisplay}"`
+  -H "Authorization: Bearer ${keyDisplay}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model":"auto:text"}'`
     const python = `import requests
 
 headers = {"Authorization": "Bearer ${keyDisplay}"}
@@ -353,6 +355,7 @@ console.log(selfTest.ok);`
     "model": "auto:text",
     "messages": [{"role": "user", "content": "你好"}],
     "routing_policy": {
+      "profile": "your-profile",
       "exclude": ["agnes"],
       "min_context": 32000,
       "prefer": "capability",
@@ -718,7 +721,9 @@ console.log(selfTest.ok);`
         <CodeBlock code={autoCode[codeTab]} id={`auto-${codeTab}`} copied={copied} onCopy={copy} />
         <div className="pt-3 border-t border-gray-100 space-y-2">
           <p className="text-sm font-medium text-gray-800">请求级策略（可选扩展）</p>
-          <p className="text-xs text-gray-500">请求可以临时排除厂商、提高上下文下限或指定 fallback；它不能放宽 API Key 已设置的权限。</p>
+          <p className="text-xs text-gray-500">
+            profile 是服务端已部署并授权给当前 Key 的命名策略；没有 profile 时删除该字段即可。请求还可以临时排除厂商、提高上下文下限或指定 fallback，但不能放宽 profile 或 API Key 的权限。
+          </p>
           <CodeBlock code={routingPolicyCode} id="routing-policy" copied={copied} onCopy={copy} />
         </div>
       </div>
@@ -728,10 +733,12 @@ console.log(selfTest.ok);`
         <h2 className="text-sm font-semibold text-gray-900">生产接入建议</h2>
         <div className="grid md:grid-cols-2 gap-3">
           {[
-            { title: '优先使用 auto:', text: '第三方服务建议默认调用 auto:text、auto:fast 或 auto:smart，避免固定到单个免费模型。' },
-            { title: '尊重 retry_after', text: '收到 all_candidates_rate_limited 时读取 retry_after，等待后再重试，不要立即循环重试。' },
+            { title: '每个应用一个 Key', text: '第三方服务使用独立 ac_ Key；如分配了 profile，自检和业务请求必须使用同一个名称。' },
+            { title: '优先使用 auto:', text: '建议默认调用 auto:text、auto:fast 或 auto:smart，避免固定到单个免费模型。' },
+            { title: '尊重 Retry-After', text: '终态 429/503 优先读取标准 Retry-After，有限退避，不要立即循环重试。' },
             { title: '设置超时', text: '客户端建议设置 60-120 秒超时；流式请求要处理连接中断和 [DONE]。' },
-            { title: '记录诊断 header', text: '保存 X-AC-Selected-Model、X-AC-Attempted-Models，排查上游波动会轻松很多。' },
+            { title: '只发一次逻辑请求', text: '候选切换已由 AC 完成，调用方不要再遍历模型做第二层 fallback。' },
+            { title: '记录诊断 Header', text: '保存请求 ID、最终模型和尝试次数；不要记录 Authorization。' },
           ].map((item) => (
             <div key={item.title} className="border border-gray-100 rounded-xl p-3 bg-gray-50/60">
               <div className="text-sm font-medium text-gray-900">{item.title}</div>
@@ -769,15 +776,18 @@ console.log(selfTest.ok);`
         <h2 className="text-sm font-semibold text-gray-900">响应诊断 Header</h2>
         <div className="grid md:grid-cols-2 gap-2">
           {[
+            ['X-AC-Request-ID', '请求关联 ID；用于对应服务端日志'],
             ['X-AC-Route', '请求使用的路由或模型名'],
             ['X-AC-Selected-Model', '最终命中的上游模型'],
             ['X-AC-Selected-Provider', '最终命中的上游厂商'],
             ['X-AC-Actual-Model', '厂商/模型的完整实际路由'],
-            ['X-AC-Fallback-Triggered', '是否发生自动降级'],
+            ['X-AC-Fallback-Triggered', '是否实际尝试了第二个候选'],
             ['X-AC-Model-Verified-At', '模型最近一次成功验证时间'],
             ['X-AC-Attempted-Models', '本次尝试过的候选模型'],
+            ['X-AC-Attempt-Count', '实际发起的上游尝试次数'],
             ['X-AC-Fallback-Count', '自动 fallback 次数'],
-            ['X-AC-Retry-After', '建议等待秒数'],
+            ['Retry-After', '标准 HTTP 建议等待秒数，调用方优先读取'],
+            ['X-AC-Retry-After', '与 Retry-After 相同的 AC 兼容字段'],
           ].map(([name, desc]) => (
             <div key={name} className="flex items-start gap-2 border border-gray-100 rounded-lg px-3 py-2">
               <code className="text-xs font-mono text-blue-700 shrink-0">{name}</code>
@@ -817,6 +827,8 @@ console.log(selfTest.ok);`
         <h2 className="text-sm font-semibold text-gray-900">错误码</h2>
         <div className="space-y-2">
           {[
+            { code: 'profile_not_found', desc: '请求的命名 profile 未部署；检查名称并在变更后重启 AC' },
+            { code: 'profile_unauthorized', desc: '当前 API Key 无权使用该 profile；需要管理员调整 allowed_profiles' },
             { code: 'model_not_found', desc: '指定模型不存在，或当前不在可调用池中' },
             { code: 'no_eligible_model', desc: '没有模型满足 auto 路由的类别或硬约束，不应原样重试' },
             { code: 'all_candidates_unavailable', desc: '存在合格模型，但当前全部不可用，可稍后重试' },
