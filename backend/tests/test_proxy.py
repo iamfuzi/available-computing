@@ -1,5 +1,4 @@
 import pytest
-import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock, AsyncMock
 from database import get_session
@@ -578,7 +577,6 @@ class TestHealthAwareRouting:
 class TestAutoRouting:
     @pytest.mark.asyncio
     async def test_auto_text_resolves(self, app_client, auth_headers, sample_model, sample_channel):
-        from models import Model
         sample_model.category = "text"
         sample_model.health_status = "healthy"
         db_session = app_client._transport.app.dependency_overrides[get_session]()
@@ -719,6 +717,40 @@ class TestAutoRouting:
         assert resp.headers["X-AC-Attempted-Models"] == "openrouter/only-free"
 
     @pytest.mark.asyncio
+    async def test_auto_text_existing_cooldown_returns_retryable_429(
+        self, app_client, auth_headers, db_session, sample_channel
+    ):
+        """A later request must see cooldown as temporary, not model-not-found."""
+        from models import Model
+
+        cooling = Model(
+            id="mdl-already-cooling",
+            channel_id=sample_channel.id,
+            model_id="already-cooling",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="rate_limited",
+            rate_limited_until=datetime.now(timezone.utc) + timedelta(seconds=90),
+        )
+        db_session.add(cooling)
+        db_session.commit()
+
+        resp = await app_client.post(
+            "/v1/chat/completions",
+            json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 429
+        error = resp.json()["error"]
+        assert error["type"] == "rate_limited"
+        assert error["code"] == "all_candidates_rate_limited"
+        assert error["retryable"] is True
+        assert 1 <= error["retry_after"] <= 90
+        assert resp.headers["Retry-After"] == str(error["retry_after"])
+
+    @pytest.mark.asyncio
     async def test_auto_text_skips_busy_model(self, app_client, auth_headers, db_session, sample_channel):
         from models import Model
         from api.proxy import _model_semaphores, _model_slot_key
@@ -782,6 +814,8 @@ class TestAutoRouting:
         assert posted_models == ["busy-second"]
         assert resp.headers["X-AC-Selected-Model"] == "busy-second"
         assert resp.headers["X-AC-Attempted-Models"] == "openrouter/busy-second"
+        assert resp.headers["X-AC-Attempt-Count"] == "1"
+        assert resp.headers["X-AC-Fallback-Triggered"] == "false"
 
     @pytest.mark.asyncio
     async def test_auto_text_all_busy_has_structured_error(self, app_client, auth_headers, db_session, sample_channel):
@@ -929,8 +963,25 @@ class TestAutoRouting:
         assert resp.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_auto_no_available_models_404(self, app_client, auth_headers, db_session, sample_channel):
-        """All models down → auto:text returns 404."""
+    async def test_auto_no_eligible_models_404(self, app_client, auth_headers):
+        """No model satisfies the route at all → non-retryable no_eligible_model."""
+        resp = await app_client.post(
+            "/v1/chat/completions",
+            json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 404
+        error = resp.json()["error"]
+        assert error["type"] == "no_eligible_model"
+        assert error["code"] == "no_eligible_model"
+        assert error["retryable"] is False
+
+    @pytest.mark.asyncio
+    async def test_auto_down_models_return_retryable_503(
+        self, app_client, auth_headers, db_session, sample_channel
+    ):
+        """Matching but unhealthy models are temporary route exhaustion, not 404."""
         from models import Model
         down = Model(
             id="mdl-down2",
@@ -949,7 +1000,120 @@ class TestAutoRouting:
             json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
             headers=auth_headers,
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 503
+        error = resp.json()["error"]
+        assert error["type"] == "routing_exhausted"
+        assert error["code"] == "all_candidates_unavailable"
+        assert error["retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_400_does_not_spend_fallback_quota(
+        self, app_client, auth_headers, db_session, sample_channel
+    ):
+        """A deterministic caller error returns after the first upstream."""
+        from models import Model
+
+        first = Model(
+            id="mdl-bad-request-first",
+            channel_id=sample_channel.id,
+            model_id="bad-request-first",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="healthy",
+            last_response_ms=100,
+        )
+        second = Model(
+            id="mdl-bad-request-second",
+            channel_id=sample_channel.id,
+            model_id="bad-request-second",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="healthy",
+            last_response_ms=200,
+        )
+        db_session.add_all([first, second])
+        db_session.commit()
+
+        upstream = MagicMock(status_code=400, headers={})
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_cm.post = AsyncMock(return_value=upstream)
+
+        with patch("httpx.AsyncClient", return_value=mock_cm):
+            resp = await app_client.post(
+                "/v1/chat/completions",
+                json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 400
+        assert mock_cm.post.call_count == 1
+        error = resp.json()["error"]
+        assert error["type"] == "invalid_request_error"
+        assert error["code"] == "upstream_non_retryable_error"
+        assert error["retryable"] is False
+
+    @pytest.mark.asyncio
+    async def test_invalid_200_payload_falls_back_and_records_failure(
+        self, app_client, auth_headers, db_session, sample_channel
+    ):
+        """HTTP 200 without Chat Completions shape is not a healthy success."""
+        from models import Model
+
+        first = Model(
+            id="mdl-invalid-first",
+            channel_id=sample_channel.id,
+            model_id="invalid-first",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="healthy",
+            last_response_ms=100,
+        )
+        second = Model(
+            id="mdl-valid-second",
+            channel_id=sample_channel.id,
+            model_id="valid-second",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="healthy",
+            last_response_ms=200,
+        )
+        db_session.add_all([first, second])
+        db_session.commit()
+
+        invalid = MagicMock(status_code=200, headers={})
+        invalid.json.return_value = {}
+        valid = MagicMock(status_code=200, headers={})
+        valid.json.return_value = {
+            "id": "chatcmpl-valid",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_cm.post = AsyncMock(side_effect=[invalid, valid])
+
+        with patch("httpx.AsyncClient", return_value=mock_cm):
+            resp = await app_client.post(
+                "/v1/chat/completions",
+                json={"model": "auto:text", "messages": [{"role": "user", "content": "hi"}]},
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 200
+        assert mock_cm.post.call_count == 2
+        assert resp.headers["X-AC-Selected-Model"] == "valid-second"
+        assert resp.headers["X-AC-Attempted-Models"] == (
+            "openrouter/invalid-first,openrouter/valid-second"
+        )
+        db_session.refresh(first)
+        assert first.health_status == "slow"
+        assert first.consecutive_errors == 1
 
 
 class TestSmartFastRouting:
@@ -1013,7 +1177,6 @@ class TestSmartFastRouting:
         # Generic chat routing should not pick a code/vision model for ordinary
         # text requests, even if that model is larger.
         from api.proxy import _resolve_smart_model
-        from models import Model
         db_session.add(self._make_model(sample_channel.id, "text-7b", param_size=7))
         code = self._make_model(sample_channel.id, "code-32b", param_size=32)
         code.category = "code"

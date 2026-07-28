@@ -818,13 +818,16 @@ console.log(selfTest.ok);`
         <div className="space-y-2">
           {[
             { code: 'model_not_found', desc: '指定模型不存在，或当前不在可调用池中' },
-            { code: 'no_available_models', desc: 'auto 路由没有已验证可用候选' },
+            { code: 'no_eligible_model', desc: '没有模型满足 auto 路由的类别或硬约束，不应原样重试' },
+            { code: 'all_candidates_unavailable', desc: '存在合格模型，但当前全部不可用，可稍后重试' },
             { code: 'all_candidates_busy', desc: '候选模型当前并发槽已满，稍后重试或降低并发' },
             { code: 'all_candidates_rate_limited', desc: '候选模型全部处于上游限流，读取 retry_after 后重试' },
             { code: 'local_rate_limited', desc: '本项目本地限流触发，按 API Key 与路由维度计算' },
             { code: 'local_model_budget_exceeded', desc: '模型本地 RPM/RPD 预算已满，系统会优先尝试其他候选' },
             { code: 'model_rate_limited', desc: '指定模型被上游限流，建议改用 auto 路由' },
             { code: 'upstream_auth_failed', desc: '上游 Key、账号或计费状态异常' },
+            { code: 'upstream_non_retryable_error', desc: '上游返回确定性 4xx，AC 不会继续消耗 fallback 配额' },
+            { code: 'invalid_upstream_response', desc: '上游返回 200，但正文不符合 Chat Completions 结构' },
             { code: 'upstream_server_error', desc: '上游服务异常，可稍后重试' },
           ].map((e) => (
             <div key={e.code} className="flex items-start gap-3">

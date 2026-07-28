@@ -8,7 +8,7 @@ network is needed, and assert what lands in the DB.
 import base64
 import pytest
 from unittest.mock import AsyncMock, patch
-from sqlmodel import Session, select
+from sqlmodel import select
 from adapters.base import ModelInfo
 
 

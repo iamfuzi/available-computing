@@ -1,7 +1,6 @@
 import pytest
 import yaml
-from pathlib import Path
-from services.whitelist import WhitelistManager, WhitelistEntry
+from services.whitelist import WhitelistManager
 
 
 @pytest.fixture

@@ -12,6 +12,7 @@ candidate-selection logic lives here.
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timezone
 
@@ -274,6 +275,61 @@ def request_candidate_models(
     return [], first_error or f"No verified available models for {model_id}"
 
 
+def classify_auto_route_unavailability(
+    model_id: str,
+    session: Session,
+    policy: EffectiveRoutingPolicy,
+) -> tuple[str, int | None]:
+    """Explain why an ``auto:*`` route produced no callable candidates.
+
+    Candidate selection intentionally removes unhealthy and cooling models.
+    The HTTP layer still needs to distinguish three materially different
+    outcomes for callers:
+
+    - ``no_eligible_model``: no active model satisfies the hard policy;
+    - ``rate_limited``: a matching model exists and has a live cooldown;
+    - ``temporarily_unavailable``: matching models exist but are down,
+      unverified, or attached to an unavailable channel.
+
+    Returns ``(kind, retry_after_seconds)``. The retry value is only populated
+    for ``rate_limited`` and points to the earliest model cooldown expiry.
+    """
+    auto_match = AUTO_RE.match(model_id)
+    if not auto_match:
+        return "no_eligible_model", None
+
+    stmt = select(Model).where(Model.is_active == True)
+    if policy.free_only:
+        stmt = stmt.where(Model.is_free == True)
+    rows = session.exec(stmt).all()
+    chat = [model for model in rows if scoring.is_pool_eligible(model, session)]
+
+    kind = auto_match.group(1)
+    if kind in {"smart", "fast"}:
+        text_candidates = [model for model in chat if scoring.is_generic_text_candidate(model)]
+        candidates = text_candidates or chat
+    else:
+        candidates = [model for model in chat if (model.category or "text") == kind]
+
+    candidates = apply_routing_policy(candidates, policy, session)
+    if not candidates:
+        return "no_eligible_model", None
+
+    now = datetime.now(timezone.utc)
+    retry_after_values: list[int] = []
+    for model in candidates:
+        if not scoring.is_cooling_down(model) or model.rate_limited_until is None:
+            continue
+        until = model.rate_limited_until
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        retry_after_values.append(max(1, math.ceil((until - now).total_seconds())))
+
+    if retry_after_values:
+        return "rate_limited", min(retry_after_values)
+    return "temporarily_unavailable", None
+
+
 # ---------------------------------------------------------------------------
 # Binding helpers — combine candidate selection with channel/adapter/key binding.
 # These return (model, channel, adapter, key) tuples or all-None.
@@ -455,4 +511,3 @@ def model_route_eligible(model: Model, session: Session) -> bool:
         and scoring.is_pool_eligible(model, session)
         and channel_route_eligible(channel)
     )
-

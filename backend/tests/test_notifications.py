@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import select
 
 from models import CandidateProvider, CandidateSourceState, HealthRecord, Notification
 from services.notification_delivery import NotificationDispatcher

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from models import ApiKey, Model
+from models import ApiKey
 
 
 def _add_key(db_session, raw: str, **policy) -> ApiKey:

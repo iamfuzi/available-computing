@@ -65,7 +65,6 @@ class ZhiPuAdapter(ProviderAdapter):
             ))
 
         # ZhiPu /v4/models omits flash models — supplement from whitelist
-        from services.whitelist import whitelist
         for entry in (self._whitelist_free_models() or []):
             if entry["id"] not in seen:
                 seen.add(entry["id"])

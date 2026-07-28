@@ -35,6 +35,7 @@ from services.router import (
     apply_routing_policy as _apply_routing_policy,
     auto_candidate_models as _auto_candidate_models,
     channel_route_eligible as _channel_route_eligible,
+    classify_auto_route_unavailability as _classify_auto_route_unavailability,
     effective_routing_policy as _effective_routing_policy,
     is_profile_authorized as _is_profile_authorized,
     load_profile as _load_profile,
@@ -68,6 +69,10 @@ logger = logging.getLogger(__name__)
 # Maximum upstream attempts within a single request's fallback chain. Kept in
 # the proxy module (not the router package) because it bounds the HTTP loop.
 _MAX_UPSTREAM_ATTEMPTS = 50
+
+# Only transient statuses should spend another provider's quota. Caller or
+# policy errors are deterministic across providers and must return immediately.
+_RETRYABLE_UPSTREAM_STATUSES = {408, 429, 500, 502, 503, 504}
 
 _proxy_requests: dict[str, list[float]] = {}
 _model_semaphores: dict[str, asyncio.Semaphore] = {}
@@ -339,6 +344,29 @@ def _build_openai_payload(body: ChatRequest):
         val = getattr(body, field, None)
         if val is not None:
             payload[field] = val
+    return payload
+
+
+def _parse_chat_completion_payload(response: httpx.Response) -> dict | None:
+    """Return a minimally valid Chat Completions payload, else ``None``.
+
+    Free upstreams occasionally answer HTTP 200 with HTML, an empty object, or
+    another non-OpenAI shape. Treating that as success poisons health scoring
+    and pushes a parsing failure onto the caller. Keep validation deliberately
+    small: callers may legitimately receive tool calls or a null ``content``.
+    """
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict) or not isinstance(first_choice.get("message"), dict):
+        return None
     return payload
 
 
@@ -780,12 +808,45 @@ async def chat_completions(
     policy = _effective_routing_policy(auth, body.routing_policy, profile)
     candidate_models, error = _request_candidate_models(body.model, session, policy)
     if error:
-        code = "no_available_models" if _AUTO_RE.match(body.model) else "model_not_found"
+        if _AUTO_RE.match(body.model):
+            unavailable_kind, retry_after = _classify_auto_route_unavailability(
+                body.model, session, policy
+            )
+            if unavailable_kind == "rate_limited":
+                return _make_ac_error(
+                    429,
+                    "All eligible models are currently rate limited",
+                    "rate_limited",
+                    "all_candidates_rate_limited",
+                    retry_after=retry_after,
+                    attempted_models=[],
+                    route=body.model,
+                    request_id=request_id,
+                )
+            if unavailable_kind == "temporarily_unavailable":
+                return _make_ac_error(
+                    503,
+                    "Eligible models exist but are temporarily unavailable",
+                    "routing_exhausted",
+                    "all_candidates_unavailable",
+                    attempted_models=[],
+                    route=body.model,
+                    request_id=request_id,
+                )
+            return _make_ac_error(
+                404,
+                error,
+                "no_eligible_model",
+                "no_eligible_model",
+                param="model",
+                route=body.model,
+                request_id=request_id,
+            )
         return _make_ac_error(
             404,
             error,
             "invalid_request_error",
-            code,
+            "model_not_found",
             param="model",
             route=body.model,
             request_id=request_id,
@@ -815,6 +876,7 @@ async def chat_completions(
     original_model = body.model
     last_rate_retry_after: int | None = None
     last_upstream_status: int | None = None
+    last_failure_kind: str | None = None
     busy_models: list[str] = []
     budget_limited: list[str] = []
     budget_retry_after: int | None = None
@@ -888,6 +950,7 @@ async def chat_completions(
                 ms = int((time.monotonic() - start) * 1000)
                 await record_passive_health(model.id, ms, "network_error", channel.id, key)
                 last_upstream_status = 503
+                last_failure_kind = "network"
                 continue
 
             if response.status_code == 200:
@@ -910,7 +973,6 @@ async def chat_completions(
                             selected_verified_at=model.last_verified_at,
                             fallback_triggered=(
                                 model.id not in primary_candidate_ids
-                                or candidate_index > 0
                                 or len(attempted) > 1
                             ),
                             request_id=request_id,
@@ -931,6 +993,7 @@ async def chat_completions(
                 last_rate_retry_after = record_rate_limit(model.id, _parse_retry_after(response.headers), session, ms)
                 trigger_event_recheck(model.id, "rate_limited")
                 last_upstream_status = 429
+                last_failure_kind = "http"
                 continue
             if response.status_code >= 500:
                 await record_passive_health(model.id, ms, "server_error", channel.id, key)
@@ -944,6 +1007,28 @@ async def chat_completions(
                     await broadcast_notifications_updated()
                 failed_channels.add(channel.id)
             last_upstream_status = response.status_code
+            last_failure_kind = "http"
+            if response.status_code not in _RETRYABLE_UPSTREAM_STATUSES:
+                error_code = (
+                    "upstream_auth_failed"
+                    if response.status_code in (401, 403)
+                    else "upstream_non_retryable_error"
+                )
+                error_type = (
+                    "upstream_invalid_response"
+                    if response.status_code in (401, 403)
+                    else "invalid_request_error"
+                )
+                return _make_ac_error(
+                    response.status_code,
+                    f"Upstream rejected the request with status {response.status_code}",
+                    error_type,
+                    error_code,
+                    attempted_models=attempted,
+                    route=original_model,
+                    request_id=request_id,
+                    scope="upstream",
+                )
             continue
 
         r = None
@@ -955,11 +1040,29 @@ async def chat_completions(
             ms = int((time.monotonic() - start) * 1000)
             await record_passive_health(model.id, ms, "network_error", channel.id, key)
             last_upstream_status = 503
+            last_failure_kind = "network"
             continue
         finally:
             _release_model_slot(slot_key)
 
         if r.status_code == 200:
+            response_payload = _parse_chat_completion_payload(r)
+            if response_payload is None:
+                await record_passive_health(
+                    model.id, ms, "invalid_response", channel.id, key
+                )
+                last_upstream_status = 502
+                last_failure_kind = "invalid_response"
+                logger.warning(
+                    "upstream fail request_id=%s provider=%s model=%s "
+                    "status=200 reason=invalid_response ms=%s attempt=%d",
+                    request_id,
+                    channel.provider_type,
+                    model.model_id,
+                    ms,
+                    upstream_attempts_made,
+                )
+                continue
             await record_passive_health(model.id, ms, None, channel.id, key)
             clear_billing_failures(model.id, session)
             clear_rate_limit(model.id, session)
@@ -968,7 +1071,7 @@ async def chat_completions(
                 request_id, channel.provider_type, model.model_id, ms, upstream_attempts_made,
             )
             return JSONResponse(
-                content=r.json(),
+                content=response_payload,
                 status_code=200,
                 headers=_diagnostic_headers(
                     route=original_model,
@@ -978,7 +1081,6 @@ async def chat_completions(
                     selected_verified_at=model.last_verified_at,
                     fallback_triggered=(
                         model.id not in primary_candidate_ids
-                        or candidate_index > 0
                         or len(attempted) > 1
                     ),
                     request_id=request_id,
@@ -993,6 +1095,7 @@ async def chat_completions(
             last_rate_retry_after = record_rate_limit(model.id, _parse_retry_after(r.headers), session, ms)
             trigger_event_recheck(model.id, "rate_limited")
             last_upstream_status = 429
+            last_failure_kind = "http"
             continue
         if r.status_code >= 500:
             await record_passive_health(model.id, ms, "server_error", channel.id, key)
@@ -1005,6 +1108,28 @@ async def chat_completions(
                 await broadcast_notifications_updated()
                 failed_channels.add(channel.id)
         last_upstream_status = r.status_code
+        last_failure_kind = "http"
+        if r.status_code not in _RETRYABLE_UPSTREAM_STATUSES:
+            error_code = (
+                "upstream_auth_failed"
+                if r.status_code in (401, 403)
+                else "upstream_non_retryable_error"
+            )
+            error_type = (
+                "upstream_invalid_response"
+                if r.status_code in (401, 403)
+                else "invalid_request_error"
+            )
+            return _make_ac_error(
+                r.status_code,
+                f"Upstream rejected the request with status {r.status_code}",
+                error_type,
+                error_code,
+                attempted_models=attempted,
+                route=original_model,
+                request_id=request_id,
+                scope="upstream",
+            )
         continue
 
     body.model = original_model
@@ -1048,7 +1173,9 @@ async def chat_completions(
     # Every candidate has been tried without success — the routing policy was
     # satisfied (candidates existed) but none could complete the request. Map
     # the last upstream status to a standard error type/code.
-    if last_upstream_status in (401, 403):
+    if last_failure_kind == "invalid_response":
+        final_type, error_code = "upstream_invalid_response", "invalid_upstream_response"
+    elif last_upstream_status in (401, 403):
         final_type, error_code = "upstream_invalid_response", "upstream_auth_failed"
     elif last_upstream_status and last_upstream_status >= 500:
         final_type, error_code = "routing_exhausted", "upstream_server_error"

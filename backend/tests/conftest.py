@@ -13,8 +13,8 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine, Session
 
 import database
-from models import Channel, Model, HealthRecord, Setting
-from services.crypto import encrypt, generate_salt
+from models import Channel, Model, Setting
+from services.crypto import encrypt
 
 
 # ── In-memory SQLite engine (session-scoped) ──────────────────────────────

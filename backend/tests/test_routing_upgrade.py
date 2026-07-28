@@ -431,7 +431,6 @@ class TestHardDenylistFilter:
     ):
         """A denied model cannot re-enter via the fallback_chain field."""
         from models import Model
-        from services.crypto import encrypt, generate_salt
 
         # Create a model that the request will try to fall back to, but which
         # the profile's deny pattern will reject.
@@ -688,8 +687,7 @@ class TestFreeOnly:
         """A profile with free_only=false lets paid models into the candidate pool."""
         from models import Model, Channel
         from services.crypto import encrypt, generate_salt
-        from services.router import chat_candidates, EffectiveRoutingPolicy, apply_routing_policy
-        from services.router.profiles import RoutingProfile
+        from services.router import chat_candidates
 
         salt = generate_salt()
         ch = Channel(id="ch-fo", provider_type="groq", name="g",

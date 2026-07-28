@@ -350,11 +350,13 @@ curl "$AC_BASE_URL/ac/models?include_unavailable=true" \
 ```json
 {
   "error": {
-    "message": "No available model",
-    "type": "invalid_request_error",
-    "code": "no_available_models",
-    "retry_after": 60,
-    "attempted_models": ["model-a", "model-b"]
+    "message": "Eligible models exist but are temporarily unavailable",
+    "type": "routing_exhausted",
+    "code": "all_candidates_unavailable",
+    "retryable": true,
+    "scope": "routing_profile",
+    "request_id": "ac_req_xxx",
+    "attempted_models": []
   }
 }
 ```
@@ -364,13 +366,15 @@ curl "$AC_BASE_URL/ac/models?include_unavailable=true" \
 | HTTP | 常见含义 | 调用方处理 |
 |---:|---|---|
 | `401` | Key 无效、停用或 JWT 过期 | 检查凭证，不要盲目重试 |
-| `404` | 模型不存在或当前无合格候选 | 刷新模型列表或改用 `auto:*` |
+| `404` | 具体模型不存在，或没有模型满足 `auto:*` 的硬约束 | 检查模型名、类别和路由策略；不要原样重试 |
 | `422` | 请求字段不合法 | 修正参数 |
 | `429` | 本地 Key 限制、模型预算或上游限流 | 优先读取 `retry_after` / `X-AC-Retry-After` |
-| `502` | 上游返回不可用响应 | 短暂退避；检查尝试列表 |
-| `503` | 当前候选都忙或无可路由渠道 | 指数退避并查询 `/ac/status` |
+| `502` | 所有候选均返回了非法 Chat Completions 响应 | 短暂退避；检查尝试列表 |
+| `503` | 有合格模型，但当前全部 down、繁忙或无法完成请求 | 指数退避并查询 `/ac/status` |
 
-Chat 路由已经对可重试的上游错误执行候选回退。客户端仍应设置有限次数的指数退避，并加入随机抖动；不要无上限循环，否则会同时耗尽多个免费渠道。
+Chat 路由只对网络错误以及 `408`、`429`、`500`、`502`、`503`、`504`
+执行候选回退；其他上游 4xx 会立即返回，避免为确定性的请求错误重复消耗额度。
+客户端仍应设置有限次数的指数退避，并加入随机抖动；不要无上限循环，否则会同时耗尽多个免费渠道。
 
 ---
 
