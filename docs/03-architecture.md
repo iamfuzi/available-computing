@@ -39,8 +39,8 @@ Vite 将 `/api`、`/v1` 和 `/ws` 代理到 `127.0.0.1:8002`。统一启动入�
 ### 2.2 Docker 单容器
 
 ```text
-Browser / SDK → http://localhost:8080
-                └─ FastAPI :8080
+Browser / SDK → http://localhost:8081
+                └─ Docker host :8081 → FastAPI container :8080
                    ├─ 托管已构建 React 静态文件
                    ├─ 管理 API / WebSocket
                    └─ OpenAI 兼容代理

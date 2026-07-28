@@ -596,7 +596,7 @@ interface ProviderAdapter {
 echo "yourpassword" | docker secret create ac_admin_password -
 
 docker run -d \
-  -p 8080:8080 \
+  -p 8081:8080 \
   -v ./data:/app/data \
   -e ADMIN_PASSWORD_FILE=/run/secrets/ac_admin_password \
   --secret ac_admin_password \
@@ -604,7 +604,7 @@ docker run -d \
 
 # 或使用环境变量（仅开发环境）
 docker run -d \
-  -p 8080:8080 \
+  -p 8081:8080 \
   -v ./data:/app/data \
   -e ADMIN_PASSWORD=yourpassword \
   available-computing:latest

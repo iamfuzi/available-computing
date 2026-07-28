@@ -9,7 +9,7 @@
 | 文档 | 用途 |
 |---|---|
 | [03-architecture.md](./03-architecture.md) | Personal V1 当前代码架构、数据、路由与调度 |
-| [05-deployment.md](./05-deployment.md) | Docker `8080`、源码开发 `5173/8002`、配置、备份与排障 |
+| [05-deployment.md](./05-deployment.md) | Docker `8081`、源码开发 `5173/8002`、配置、备份与排障 |
 | [06-integration.md](./06-integration.md) | `ac_` Key、Chat/Embedding/Rerank/Image 和诊断接口 |
 | [07-personal-v1-upgrade.md](./07-personal-v1-upgrade.md) | 用户确认后的 V1 产品边界和验收结果 |
 | [08-original-plan-progress.md](./08-original-plan-progress.md) | 对原始升级方案逐阶段的实施结论 |

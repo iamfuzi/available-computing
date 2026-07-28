@@ -49,7 +49,7 @@ python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.tok
 docker compose up -d
 
 # 4. 打开浏览器
-open http://localhost:8080
+open http://localhost:8081
 ```
 
 首次访问用设置的密码登录，然后添加你的 API Key 即可。
@@ -67,7 +67,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="ac_your-api-key-here",    # 在设置页创建
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:8081/v1"
 )
 
 # 调用指定模型
@@ -91,11 +91,11 @@ response = client.chat.completions.create(
 
 ```bash
 # 列出可用模型
-curl http://localhost:8080/v1/models \
+curl http://localhost:8081/v1/models \
   -H "Authorization: Bearer ac_your-api-key-here"
 
 # 聊天补全
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:8081/v1/chat/completions \
   -H "Authorization: Bearer ac_your-api-key-here" \
   -H "Content-Type: application/json" \
   -d '{
@@ -173,7 +173,7 @@ cd frontend
 npm install
 ```
 
-本地开发使用 `http://localhost:5173/`；Docker 单容器部署使用 `http://localhost:8080/`。
+本地开发使用 `http://localhost:5173/`；Docker 单容器部署默认使用 `http://localhost:8081/`。如需其他宿主机端口，在 `.env` 中设置 `AC_PORT`。
 
 ## 备份与恢复检查
 
@@ -265,7 +265,7 @@ echo "your-secure-password" > secrets/admin_password.txt
 python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.token_hex(32))"
 
 docker compose up -d
-# Open http://localhost:8080
+# Open http://localhost:8081
 ```
 
 ## API Key Usage
@@ -279,7 +279,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="ac_your-api-key-here",
-    base_url="http://localhost:8080/v1"
+    base_url="http://localhost:8081/v1"
 )
 
 # Call a specific model
@@ -346,7 +346,7 @@ cd ..
 # Backend:  http://localhost:8002/
 ```
 
-Docker remains the single-container deployment and is served at `http://localhost:8080/`.
+Docker remains the single-container deployment and is served at `http://localhost:8081/` by default. Set `AC_PORT` in `.env` to use another host port.
 
 ## Tech Stack
 

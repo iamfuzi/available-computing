@@ -28,15 +28,14 @@ def _run_migrations() -> None:
     - A brand-new DB built by current ``create_all`` already matches head →
       stamp head without running ALTER statements.
 
-    Migration failures are logged but never block startup.
+    Migration failures propagate and block startup. Running with a partially
+    upgraded schema is more dangerous than being temporarily unavailable.
     """
-    import logging
     from pathlib import Path
     from alembic import command
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    log = logging.getLogger("database")
     backend_dir = Path(__file__).parent
     cfg = Config(str(backend_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(backend_dir / "alembic"))
@@ -52,74 +51,133 @@ def _run_migrations() -> None:
 
     if insp.has_table("alembic_version"):
         # Already under Alembic control: apply any pending revisions.
-        try:
-            command.upgrade(cfg, "head")
-        except Exception as e:  # pragma: no cover — best-effort
-            log.warning("Alembic upgrade failed (continuing): %s", e)
+        command.upgrade(cfg, "head")
         return
 
-    # No alembic_version table yet. Infer the newest known compatible revision.
-    model_cols = {c["name"] for c in insp.get_columns("model")}
-    channel_cols = {c["name"] for c in insp.get_columns("channel")} if insp.has_table("channel") else set()
-    health_cols = {c["name"] for c in insp.get_columns("healthrecord")} if insp.has_table("healthrecord") else set()
-    apikey_cols = {c["name"] for c in insp.get_columns("apikey")} if insp.has_table("apikey") else set()
+    def has_columns(table_name: str, columns: set[str]) -> bool:
+        if not insp.has_table(table_name):
+            return False
+        actual = {column["name"] for column in insp.get_columns(table_name)}
+        return columns.issubset(actual)
 
-    head_model_cols = {
-        "last_verified_at", "verification_method",
-        "staleness_threshold_days", "free_expires_at",
+    def matches(requirements: dict[str, set[str]]) -> bool:
+        return all(has_columns(table_name, columns) for table_name, columns in requirements.items())
+
+    # A database created directly from the current SQLModel metadata is already
+    # at head. Check every application table and column before stamping; a
+    # handful of historical marker columns is not sufficient because
+    # create_all() does not add new columns to existing tables.
+    metadata_requirements = {
+        table.name: {column.name for column in table.columns}
+        for table in SQLModel.metadata.sorted_tables
     }
-    head_channel_cols = {
-        "status", "status_reason", "status_changed_at", "key_expires_at",
-        "config_type", "discovery_source", "compliance_note",
-    }
-    head_health_cols = {
-        "verification_method", "http_status", "check_run_id",
-        "failure_reason", "rate_limit_snapshot",
-    }
-    head_apikey_cols = {
-        "provider_whitelist", "provider_blacklist", "rate_limit_rpm",
-        "rate_limit_rpd", "default_prefer", "default_min_context",
-    }
-    if (
-        head_model_cols.issubset(model_cols)
-        and head_channel_cols.issubset(channel_cols)
-        and head_health_cols.issubset(health_cols)
-        and head_apikey_cols.issubset(apikey_cols)
-    ):
+    if matches(metadata_requirements):
         if head_rev:
             command.stamp(cfg, head_rev)
         return
 
+    baseline_model_cols = {"consecutive_billing_failures"}
+    param_size_model_cols = baseline_model_cols | {"param_size"}
+    cooling_model_cols = param_size_model_cols | {
+        "last_success_at", "rate_limited_until", "last_429_at", "consecutive_429",
+    }
+    freshness_model_cols = cooling_model_cols | {
+        "last_verified_at", "verification_method",
+        "staleness_threshold_days", "free_expires_at",
+    }
+    freshness_channel_cols = {
+        "status", "status_reason", "status_changed_at", "key_expires_at",
+    }
+    freshness_health_cols = {
+        "verification_method", "http_status", "check_run_id",
+        "failure_reason", "rate_limit_snapshot",
+    }
+    api_key_policy_cols = {
+        "provider_whitelist", "provider_blacklist", "rate_limit_rpm",
+        "rate_limit_rpd", "default_prefer", "default_min_context",
+    }
+    provenance_channel_cols = freshness_channel_cols | {
+        "config_type", "discovery_source", "compliance_note",
+    }
+
+    # Pre-Alembic personal installations are identified by cumulative schema
+    # markers. Pick the newest revision whose complete marker set is present,
+    # stamp it, then let Alembic apply everything after it.
     known_revisions = [
         (
+            "e5f6a7b8c9d0",
+            {
+                "model": freshness_model_cols,
+                "channel": provenance_channel_cols,
+                "healthrecord": freshness_health_cols,
+                "apikey": api_key_policy_cols,
+            },
+        ),
+        (
+            "d4e5f6a7b8c9",
+            {
+                "model": freshness_model_cols,
+                "channel": freshness_channel_cols,
+                "healthrecord": freshness_health_cols,
+                "apikey": api_key_policy_cols,
+            },
+        ),
+        (
             "c3d4e5f6a7b8",
-            head_model_cols,
+            {
+                "model": freshness_model_cols,
+                "channel": freshness_channel_cols,
+                "healthrecord": freshness_health_cols,
+            },
         ),
         (
             "b2c3d4e5f6a7",
-            {
-                "consecutive_billing_failures", "param_size", "last_success_at",
-                "rate_limited_until", "last_429_at", "consecutive_429",
-            },
+            {"model": cooling_model_cols},
         ),
-        ("a1b2c3d4e5f6", {"consecutive_billing_failures", "param_size"}),
-        ("7526ef5a88ed", {"consecutive_billing_failures"}),
+        ("a1b2c3d4e5f6", {"model": param_size_model_cols}),
+        ("7526ef5a88ed", {"model": baseline_model_cols}),
     ]
     inferred_revision = next(
-        (revision for revision, columns in known_revisions if columns.issubset(model_cols)),
+        (revision for revision, requirements in known_revisions if matches(requirements)),
         None,
     )
 
-    try:
-        if inferred_revision:
-            command.stamp(cfg, inferred_revision)
-        command.upgrade(cfg, "head")
-    except Exception as e:  # pragma: no cover — best-effort
-        log.warning("Alembic upgrade failed (continuing): %s", e)
+    if inferred_revision:
+        command.stamp(cfg, inferred_revision)
+    command.upgrade(cfg, "head")
+
+
+def _validate_schema() -> None:
+    """Fail fast when the database is missing a current model column."""
+    insp = inspect(engine)
+    missing: list[str] = []
+    for table in SQLModel.metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            missing.append(f"table:{table.name}")
+            continue
+        actual = {column["name"] for column in insp.get_columns(table.name)}
+        missing.extend(
+            f"{table.name}.{column.name}"
+            for column in table.columns
+            if column.name not in actual
+        )
+    if missing:
+        raise RuntimeError(f"Database schema is incomplete after migrations: {', '.join(missing)}")
 
 
 def create_db_and_tables():
+    # Existing databases must be migrated before create_all. Otherwise a table
+    # introduced by a pending migration can be pre-created at the newest
+    # schema, after which the historical migration tries to add the same
+    # columns again. Fresh databases are built from current metadata and then
+    # stamped at head.
+    existing_database = inspect(engine).has_table("model")
+    if existing_database:
+        _run_migrations()
     SQLModel.metadata.create_all(engine)
+    if not existing_database:
+        _run_migrations()
+
     # Ensure indexes exist for databases created before indexes were added
     with engine.connect() as conn:
         for idx_name, column in [
@@ -134,7 +192,7 @@ def create_db_and_tables():
             except Exception:
                 pass
         conn.commit()
-    _run_migrations()
+    _validate_schema()
 
 
 def get_session():

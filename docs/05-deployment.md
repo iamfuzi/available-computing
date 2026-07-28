@@ -11,9 +11,9 @@
 | 模式 | 页面地址 | 后端地址 | 用途 |
 |---|---|---|---|
 | 源码开发 | `http://localhost:5173/` | `http://localhost:8002/` | 开发、调试、看热更新日志 |
-| Docker 单容器 | `http://localhost:8080/` | 同一地址 | 长期个人运行 |
+| Docker 单容器 | `http://localhost:8081/` | 同一地址 | 长期个人运行 |
 
-不要在源码开发模式访问 `8080`；该端口只在 Docker 容器启动后存在。
+不要在源码开发模式访问 `8081`；该宿主机端口只在 Docker 容器启动后存在。容器内部仍监听 `8080`。
 
 ---
 
@@ -37,10 +37,16 @@ python3 -c "import secrets; open('secrets/jwt_secret.txt','w').write(secrets.tok
 chmod 600 secrets/admin_password.txt secrets/jwt_secret.txt
 
 docker compose up -d --build
-curl http://localhost:8080/api/status
+curl http://localhost:8081/api/status
 ```
 
-浏览器打开 `http://localhost:8080/`。登录密码就是 `secrets/admin_password.txt` 中的内容。
+浏览器打开 `http://localhost:8081/`。登录密码就是 `secrets/admin_password.txt` 中的内容。
+
+Compose 默认把宿主机 `8081` 映射到容器 `8080`。如需改用其他宿主机端口，在被 Git 忽略的 `.env` 中设置：
+
+```bash
+AC_PORT=8090
+```
 
 首次登录后的建议顺序：
 
@@ -184,6 +190,11 @@ curl -I http://localhost:5173/
 
 应用启动时创建缺失表并应用 Alembic 迁移。升级前仍应先做一致性备份。
 
+已有数据库会先执行 Alembic，再由 SQLModel 补充不受迁移管理的缺失对象；
+全新数据库则从当前模型创建并直接记录为最新 revision。迁移失败会阻止服务
+启动，避免 `/api/status` 看似正常但业务表仍缺字段。不要在未核对实际 schema
+时手工执行 `alembic stamp head`。
+
 ### 5.2 在线备份
 
 SQLite 使用 WAL，运行中不要只复制 `db.sqlite`。使用仓库脚本调用 SQLite Online Backup：
@@ -222,7 +233,7 @@ SQLite 使用 WAL，运行中不要只复制 `db.sqlite`。使用仓库脚本调
 
 个人使用优先选择仅局域网、Tailscale/WireGuard，或反向代理 HTTPS。若必须暴露公网：
 
-- Compose 端口改为 `127.0.0.1:8080:8080`，只让反向代理连接。
+- Compose 端口改为 `127.0.0.1:8081:8080`，只让反向代理连接。
 - 为域名启用 TLS，保留 WebSocket Upgrade 头。
 - 设置精确的 `CORS_ORIGINS`。
 - 不共享管理员密码、上游 Key 或高权限代理 Key。
@@ -232,7 +243,7 @@ Caddy 最小配置：
 
 ```caddyfile
 ai.example.com {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:8081
 }
 ```
 
@@ -251,7 +262,7 @@ docker compose up -d --build
 
 # 3. 检查
 docker compose ps
-curl http://localhost:8080/api/status
+curl http://localhost:8081/api/status
 docker compose logs --tail=100 app
 ```
 
@@ -264,7 +275,7 @@ docker compose logs --tail=100 app
 ### 页面打不开
 
 - 源码开发请打开 `http://localhost:5173/`，并确认 `5173`、`8002` 都在监听。
-- Docker 请打开 `http://localhost:8080/`，并运行 `docker compose ps` 与 `docker compose logs app`。
+- Docker 请打开 `http://localhost:8081/`，并运行 `docker compose ps` 与 `docker compose logs app`。
 - `curl /api/status` 正常而页面异常时，优先检查前端构建或 Vite 进程。
 
 ### 添加渠道后没有模型

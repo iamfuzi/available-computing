@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     ports:
-      - "8080:8080"
+      - "${AC_PORT:-8081}:8080"
     volumes:
       - ./backend/data:/app/data
     environment:

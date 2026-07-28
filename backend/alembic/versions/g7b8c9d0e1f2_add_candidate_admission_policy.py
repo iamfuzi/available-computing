@@ -17,13 +17,43 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("candidateprovider", schema=None) as batch_op:
-        batch_op.add_column(sa.Column("access_type", sa.String(), nullable=False, server_default="unknown"))
-        batch_op.add_column(sa.Column("requires_card", sa.Boolean(), nullable=False, server_default=sa.false()))
-        batch_op.add_column(sa.Column("admission_status", sa.String(), nullable=False, server_default="review_required"))
-        batch_op.add_column(sa.Column("exclusion_reason", sa.String(), nullable=True))
-        batch_op.create_index("ix_candidateprovider_access_type", ["access_type"], unique=False)
-        batch_op.create_index("ix_candidateprovider_admission_status", ["admission_status"], unique=False)
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("candidateprovider")
+    }
+    columns = [
+        sa.Column("access_type", sa.String(), nullable=False, server_default="unknown"),
+        sa.Column("requires_card", sa.Boolean(), nullable=False, server_default=sa.false()),
+        sa.Column(
+            "admission_status",
+            sa.String(),
+            nullable=False,
+            server_default="review_required",
+        ),
+        sa.Column("exclusion_reason", sa.String(), nullable=True),
+    ]
+    missing_columns = [column for column in columns if column.name not in existing_columns]
+
+    if missing_columns:
+        with op.batch_alter_table("candidateprovider", schema=None) as batch_op:
+            for column in missing_columns:
+                batch_op.add_column(column)
+
+    # create_all() in older AC startup code could pre-create this table from
+    # current metadata before Alembic reached this revision. Create indexes
+    # separately and only when absent so that state, and partially repaired
+    # databases, can continue upgrading safely.
+    inspector = sa.inspect(bind)
+    existing_indexes = {
+        index["name"] for index in inspector.get_indexes("candidateprovider")
+    }
+    for index_name, column_name in [
+        ("ix_candidateprovider_access_type", "access_type"),
+        ("ix_candidateprovider_admission_status", "admission_status"),
+    ]:
+        if index_name not in existing_indexes:
+            op.create_index(index_name, "candidateprovider", [column_name], unique=False)
 
 
 def downgrade() -> None:

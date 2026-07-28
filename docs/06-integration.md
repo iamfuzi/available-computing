@@ -15,7 +15,7 @@ Available Computing 对 Chat、Embedding 和 Image 提供 OpenAI 风格接口，
 
 | 运行方式 | 管理页面 | SDK Base URL |
 |---|---|---|
-| Docker | `http://localhost:8080/` | `http://localhost:8080/v1` |
+| Docker | `http://localhost:8081/` | `http://localhost:8081/v1` |
 | 源码开发 | `http://localhost:5173/` | `http://localhost:8002/v1` |
 | HTTPS 反向代理 | `https://ai.example.com/` | `https://ai.example.com/v1` |
 
@@ -48,7 +48,7 @@ Authorization: Bearer ac_your_key
 建议把凭证放进环境变量：
 
 ```bash
-export AC_BASE_URL="http://localhost:8080/v1"
+export AC_BASE_URL="http://localhost:8081/v1"
 export AC_API_KEY="ac_your_key"
 ```
 
@@ -460,7 +460,7 @@ Chat 路由只对网络错误以及 `408`、`429`、`500`、`502`、`503`、`504
 
 ```text
 API type: OpenAI Compatible
-Base URL: http://localhost:8080/v1
+Base URL: http://localhost:8081/v1
 API Key: ac_your_key
 Model: auto:text
 ```
@@ -497,7 +497,7 @@ print(llm.invoke("你好").content)
 ## 11. 接入检查清单
 
 - 使用的是 `ac_` 代理 Key，而不是任一厂商 Key。
-- Docker 使用 `8080/v1`；源码开发 SDK 使用 `8002/v1`。
+- Docker 默认使用 `8081/v1`；源码开发 SDK 使用 `8002/v1`。
 - `/ac/self-test` 和 `/ac/status` 对该 Key 返回预期候选；自检与正式请求使用相同 profile。
 - Key 的厂商范围、RPM/RPD 和最小上下文符合当前应用用途。
 - 若使用 profile：名称已部署、服务已重启、Key 的 `allowed_profiles` 已授权。
