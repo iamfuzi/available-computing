@@ -79,7 +79,8 @@ Model (该 Channel 下发现的模型)
 ├─────────────────────────────────────────┤
 │  📊 算力池      （首页 / Dashboard）     │
 │  🔌 厂商管理    （Channels）            │
-│  📜 调用日志    （Personal V1 已实现）   │
+│  🧭 候选厂商    （Candidates）           │
+│  🔔 消息中心    （Notifications）        │
 │  ⚙️  设置       （Settings）             │
 └─────────────────────────────────────────┘
 ```
@@ -97,7 +98,12 @@ Model (该 Channel 下发现的模型)
   ├─ 添加厂商 (/channels/new)
   └─ 厂商详情 (/channels/:id)
 
-调用日志 (/logs)        [Personal V1 已实现]
+候选厂商 (/candidates)
+  ├─ 候选列表（支持筛选：可继续审核、OpenAI 兼容、准入排除、抓取来源）
+  ├─ 候选详情（YAML 草稿、审核操作）
+  └─ 来源管理（抓取状态监控）
+
+消息中心 (/notifications)  [Personal V1 已实现]
 
 设置 (/settings)
   ├─ 基础设置（探测频率、阈值）
