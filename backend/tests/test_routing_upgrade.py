@@ -837,3 +837,89 @@ class TestProviderQualifiedAttempts:
         assert attempted.startswith("openrouter/")
         # But the OpenAI-style selected-model header stays bare.
         assert resp.headers["X-AC-Selected-Model"] == "test-model-free"
+
+
+class TestAutoRoutePolicyFallback:
+    """auto:* 的 text/整池回退必须在策略过滤之后判断。
+
+    线上事故（2026-09-11）：免费 text 类候选恰好全被 hotspot-classifier
+    profile 的 model_deny_patterns 点名排除（kilo-auto / content-safety /
+    reasoning），"text_candidates or chat" 因 text 候选非空而不回退，
+    auto:* 全线 no_available_models——而池中完全可用的 vision 类
+    flash 模型永远进不了候选。
+    """
+
+    def _setup_incident_pool(self, db_session, sample_channel):
+        """复刻事故时的模型池：text 类全被 deny，vision 类可用。"""
+        from models import Model
+
+        rows = [
+            # 三个 text 类候选：全部命中 profile deny 规则
+            Model(channel_id=sample_channel.id, model_id="kilo-auto/free",
+                  category="text", is_free=True, is_active=True, health_status="slow"),
+            Model(channel_id=sample_channel.id, model_id="nvidia/nemotron-3.5-content-safety:free",
+                  category="text", is_free=True, is_active=True, health_status="slow"),
+            Model(channel_id=sample_channel.id, model_id="nvidia/nemotron-3-nano-reasoning:free",
+                  category="text", is_free=True, is_active=True, health_status="slow"),
+            # vision 类候选：不在任何 deny 规则内、健康可用
+            Model(channel_id=sample_channel.id, model_id="glm-4v-flash",
+                  category="vision", is_free=True, is_active=True, health_status="slow"),
+            Model(channel_id=sample_channel.id, model_id="glm-4.1v-thinking-flash",
+                  category="vision", is_free=True, is_active=True, health_status="healthy"),
+        ]
+        db_session.add_all(rows)
+        db_session.commit()
+
+    def _profile_policy(self, db_session):
+        from services.router.profiles import load_profile
+        from services.router.policy import effective_routing_policy
+
+        profile = load_profile("hotspot-classifier")
+        assert profile is not None, "测试环境需能加载 hotspot-classifier profile"
+        return effective_routing_policy(api_key=None, profile=profile)
+
+    def test_auto_text_falls_back_to_chat_pool_when_text_denied(self, db_session, sample_channel):
+        """auto:text：text 候选全被策略排除时回退聊天池（vision flash 可用）"""
+        from services.router.candidates import auto_candidate_models
+
+        self._setup_incident_pool(db_session, sample_channel)
+        policy = self._profile_policy(db_session)
+
+        candidates = auto_candidate_models("text", db_session, policy=policy)
+        ids = {m.model_id for m in candidates}
+        assert ids == {"glm-4v-flash", "glm-4.1v-thinking-flash"}, (
+            f"text 候选全被 deny 后应回退到聊天池，实际: {ids}"
+        )
+
+    def test_auto_fast_prefers_surviving_text_candidates(self, db_session, sample_channel, sample_model):
+        """auto:fast：存在未被 deny 的 text 候选时仍优先 text（原有行为不变）"""
+        from services.router.candidates import auto_candidate_models
+
+        # sample_model: test-model-free, text 类, 不在 deny 规则内
+        candidates = auto_candidate_models("fast", db_session, policy=self._profile_policy(db_session))
+        assert candidates and candidates[0].model_id == "test-model-free"
+
+    def test_single_route_resolves_auto_text_under_profile(self, db_session, sample_channel):
+        """完整链路：single_route_candidates(auto:text) 在事故池下不再落空"""
+        from services.router.candidates import single_route_candidates
+
+        self._setup_incident_pool(db_session, sample_channel)
+        candidates, error = single_route_candidates("auto:text", db_session, self._profile_policy(db_session))
+        assert error is None
+        assert candidates, "auto:text 应回退到聊天池而非返回空"
+        # 健康的 thinking-flash 排在 slow 的 glm-4v-flash 之前
+        assert candidates[0].model_id == "glm-4.1v-thinking-flash"
+
+    @pytest.mark.asyncio
+    async def test_self_test_auto_text_with_profile_recovers(self, app_client, db_session, sample_channel, auth_headers):
+        """HTTP 层回归：self-test auto:text + hotspot-classifier 在事故池下 ok"""
+        self._setup_incident_pool(db_session, sample_channel)
+        resp = await app_client.post(
+            "/v1/ac/self-test",
+            json={"model": "auto:text", "routing_policy": {"profile": "hotspot-classifier"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is True, body
+        assert body["selected_model"] == "glm-4.1v-thinking-flash"

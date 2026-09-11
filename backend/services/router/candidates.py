@@ -195,14 +195,27 @@ def suggest_models(model_id: str, all_models: list[Model], limit: int = 5) -> li
     return out
 
 
-def auto_candidate_models(kind: str, session: Session, free_only: bool = True) -> list[Model]:
+def auto_candidate_models(
+    kind: str,
+    session: Session,
+    free_only: bool = True,
+    policy: EffectiveRoutingPolicy | None = None,
+) -> list[Model]:
     chat = chat_candidates(session, free_only=free_only)
+    if policy is not None:
+        # 策略过滤必须先于 text/整池的回退判断：若 text 候选存在但恰好
+        # 全被 profile 的 model_deny_patterns 点名排除，"text_candidates
+        # or chat" 的回退不会触发，auto:* 整体落空——即便聊天池里还有
+        # 完全可用的候选（线上实测：kilo-auto/content-safety/reasoning
+        # 被 hotspot-classifier deny 后，可用的 vision-flash 模型永远
+        # 进不了 auto 路由）。
+        chat = apply_routing_policy(chat, policy, session)
     text_candidates = [m for m in chat if scoring.is_generic_text_candidate(m)]
     generic_candidates = text_candidates or chat
     if kind == "smart":
         # auto:smart = "give me the most capable model". Keep deterministic
-        # param_size ordering within each tier — the user explicitly asked for
-        # the biggest, so randomizing would violate that intent.
+        # param_size ordering within each tier — the user explicitly asked
+        # for the biggest, so randomizing would violate that intent.
         candidates = generic_candidates
         candidates.sort(key=lambda m: scoring.route_score_key(m, session, smart=True))
         return candidates
@@ -211,6 +224,11 @@ def auto_candidate_models(kind: str, session: Session, free_only: bool = True) -
         candidates.sort(key=lambda m: scoring.route_score_key(m, session))
         return candidates
     candidates = [m for m in chat if (m.category or "text") == kind]
+    if kind == "text" and not candidates:
+        # auto:text 与 smart/fast 一致：无存活的纯文本类候选时回退到
+        # 聊天池。vision 类 flash 模型完全能服务文本补全（显式指定
+        # model id 一直可用即是证明），不应因类别标记被排除。
+        candidates = generic_candidates
     candidates.sort(key=lambda m: scoring.route_score_key(m, session))
     return candidates
 
@@ -224,7 +242,11 @@ def single_route_candidates(
     auto_match = AUTO_RE.match(model_id)
     if auto_match:
         kind = auto_match.group(1)
-        candidates = auto_candidate_models(kind, session, free_only=free_only)
+        # 候选在 auto_candidate_models 内部已按策略过滤（回退判断需要
+        # 过滤后的池子），此处保留二次过滤以维持既有语义（幂等）。
+        candidates = auto_candidate_models(
+            kind, session, free_only=free_only, policy=policy
+        )
         candidates = apply_routing_policy(
             candidates,
             policy,
@@ -305,13 +327,16 @@ def classify_auto_route_unavailability(
     chat = [model for model in rows if scoring.is_pool_eligible(model, session)]
 
     kind = auto_match.group(1)
+    # 与 auto_candidate_models 保持一致：先按策略过滤再做 text/整池回退，
+    # 否则诊断会把"候选全被策略排除"误报为其它失败类别。
+    chat = apply_routing_policy(chat, policy, session)
+    text_candidates = [model for model in chat if scoring.is_generic_text_candidate(model)]
     if kind in {"smart", "fast"}:
-        text_candidates = [model for model in chat if scoring.is_generic_text_candidate(model)]
         candidates = text_candidates or chat
     else:
         candidates = [model for model in chat if (model.category or "text") == kind]
-
-    candidates = apply_routing_policy(candidates, policy, session)
+        if kind == "text" and not candidates:
+            candidates = text_candidates or chat
     if not candidates:
         return "no_eligible_model", None
 
