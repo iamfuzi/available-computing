@@ -2,17 +2,19 @@ version: 1
 id: xfyun
 name: 讯飞 MaaS
 config_type: declarative
-base_url: https://maas-api.cn-huabei-1.xf-yun.com
+# chat 实际路径在 /v1 下（/v1 与 /v2 均可用，取 /v1 以匹配代理层
+# 的 {base_url}/chat/completions 拼接约定），base_url 含版本前缀。
+base_url: https://maas-api.cn-huabei-1.xf-yun.com/v1
 
 auth:
   type: bearer
   header: Authorization
 
 endpoints:
-  # 实测 2026-09-12：/v1/models 认证通过但返回空目录（MaaS 按授权开通，
-  # 不枚举模型），模型由 static_models 静态声明。chat 端点为 /v2。
-  models: /v1/models
-  chat_completions: /v2/chat/completions
+  # 实测 2026-09-12：/models 认证通过但返回空目录（MaaS 按授权开通，
+  # 不枚举模型），模型由 static_models 静态声明。
+  models: /models
+  chat_completions: /chat/completions
 
 model_mapping:
   items_path: data
