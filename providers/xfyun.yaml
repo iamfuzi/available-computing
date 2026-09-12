@@ -1,0 +1,59 @@
+version: 1
+id: xfyun
+name: 讯飞 MaaS
+config_type: declarative
+base_url: https://maas-api.cn-huabei-1.xf-yun.com
+
+auth:
+  type: bearer
+  header: Authorization
+
+endpoints:
+  # 实测 2026-09-12：/v1/models 认证通过但返回空目录（MaaS 按授权开通，
+  # 不枚举模型），模型由 static_models 静态声明。chat 端点为 /v2。
+  models: /v1/models
+  chat_completions: /v2/chat/completions
+
+model_mapping:
+  items_path: data
+  id_path: id
+
+static_models:
+  - spark-x2.5-4b
+
+free_detection:
+  method: allowlist
+  model_ids:
+    - spark-x2.5-4b
+  # 控制台标注「限时免费」——非永久档，避免误标 permanent
+  free_type: quota
+
+model_overrides:
+  spark-x2.5-4b:
+    display_name: 讯飞 Spark X2.5-4B（限时免费）
+    category: text
+
+probe:
+  prompt: Reply with OK
+  # 思维链模型：预算需覆盖 reasoning 开销（content/reasoning_content 均可作为成功信号）
+  max_tokens: 512
+
+requirements:
+  requires_card: false
+  requires_phone: true
+  requires_realname: true
+
+setup:
+  description: 讯飞 MaaS 平台，Spark-X2.5-4B 限时免费（实测中文热点分类 4/4 正确，
+    思维链在 reasoning_content 独立字段不污染正文，批量打分延迟约 10s/4条）
+  key_hint: 讯飞开放平台控制台 → MaaS 服务 → 创建 API Key（ak- 前缀）
+  console_url: https://console.xfyun.cn/
+
+compliance:
+  risk: low
+  note: 个人实名账号自用；免费为控制台标注的限时档位，政策可能调整，
+    逾期需重新复核；不得共享/转售上游 Key。
+  reviewed_at: '2026-09-12'
+  sources:
+    - https://www.xfyun.cn/doc/spark/HTTP%E8%B0%83%E7%94%A8%E6%96%87%E6%A1%A3.html
+    - https://maas-api.cn-huabei-1.xf-yun.com/v2/chat/completions

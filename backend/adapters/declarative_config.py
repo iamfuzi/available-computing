@@ -78,7 +78,9 @@ class ModelOverrideConfig(StrictModel):
 
 class ProbeConfig(StrictModel):
     prompt: str = "Reply with OK"
-    max_tokens: int = Field(default=8, ge=1, le=64)
+    # 上限 1024：思维链模型的探测预算必须容纳 reasoning 开销（如讯飞
+    # spark-x2.5-4b，8 token 会全部耗在推理字段上导致探测误判失败）。
+    max_tokens: int = Field(default=8, ge=1, le=1024)
 
 
 class RequirementsConfig(StrictModel):
@@ -128,11 +130,25 @@ class DeclarativeProviderConfig(StrictModel):
     endpoints: EndpointConfig = Field(default_factory=EndpointConfig)
     model_mapping: ModelMappingConfig = Field(default_factory=ModelMappingConfig)
     free_detection: FreeDetectionConfig
+    # 部分 OpenAI 兼容平台的 /models 目录端点不返回已购/已授权模型
+    #（如实测讯飞 MaaS 返回空列表）。static_models 允许人工审定后
+    # 静态声明模型，与目录结果合并去重；免费判定与 overrides 逻辑不变。
+    static_models: list[str] = Field(default_factory=list)
     model_overrides: dict[str, ModelOverrideConfig] = Field(default_factory=dict)
     probe: ProbeConfig = Field(default_factory=ProbeConfig)
     requirements: RequirementsConfig = Field(default_factory=RequirementsConfig)
     setup: SetupConfig
     compliance: ComplianceConfig
+
+    @field_validator("static_models")
+    @classmethod
+    def validate_static_models(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("static_models must not contain duplicates")
+        for model_id in value:
+            if not model_id.strip() or model_id != model_id.strip():
+                raise ValueError("static_models entries must be non-empty, trimmed ids")
+        return value
 
     @field_validator("id")
     @classmethod

@@ -21,7 +21,7 @@ def _mistral_adapter() -> DeclarativeAdapter:
 
 def test_repository_provider_configs_are_valid_and_unique():
     configs = load_declarative_providers(PROVIDERS_PATH)
-    assert [config.id for config in configs] == ["kilo-code", "mistral"]
+    assert [config.id for config in configs] == ["kilo-code", "mistral", "xfyun"]
     assert all(config.base_url.startswith("https://") for config in configs)
 
 
@@ -228,3 +228,57 @@ def test_every_registered_provider_has_reviewed_compliance_metadata():
         assert compliance["note"].strip()
         assert compliance["reviewed_at"]
         assert compliance["sources"]
+
+
+class TestStaticModels:
+    """static_models：目录端点为空的平台静态声明模型"""
+
+    @staticmethod
+    def _adapter(static_models=None):
+        from adapters.declarative_config import DeclarativeProviderConfig
+        from adapters.declarative import DeclarativeAdapter
+
+        config = DeclarativeProviderConfig(
+            id="test-static", name="Test", base_url="https://api.test",
+            static_models=static_models or ["static-model"],
+            free_detection={"method": "allowlist", "model_ids": ["static-model"]},
+            setup={"description": "t", "key_hint": "t", "console_url": "https://c.test"},
+            compliance={"note": "t", "reviewed_at": "2026-09-12", "sources": ["https://s.test"]},
+        )
+        return DeclarativeAdapter(config)
+
+    @pytest.mark.asyncio
+    async def test_static_model_added_when_catalog_empty(self):
+        import httpx
+        from unittest.mock import patch
+        adapter = self._adapter()
+        resp = httpx.Response(200, request=httpx.Request("GET", "https://api.test/models"),
+                              json={"data": []})
+        with patch.object(httpx.AsyncClient, "get", return_value=resp):
+            models = await adapter.list_models("k", "https://api.test")
+        ids = [m.model_id for m in models]
+        assert "static-model" in ids
+
+    @pytest.mark.asyncio
+    async def test_static_model_not_duplicated_in_catalog(self):
+        import json
+        from unittest.mock import patch
+        import httpx
+        adapter = self._adapter()
+        resp = httpx.Response(200, request=httpx.Request("GET", "https://api.test/models"),
+                              json={"data": [{"id": "static-model"}]})
+        with patch.object(httpx.AsyncClient, "get", return_value=resp):
+            models = await adapter.list_models("k", "https://api.test")
+        assert [m.model_id for m in models].count("static-model") == 1
+
+    def test_duplicate_static_models_rejected(self):
+        import pytest as _pytest
+        from adapters.declarative_config import DeclarativeProviderConfig
+        with _pytest.raises(Exception):
+            DeclarativeProviderConfig(
+                id="bad", name="Bad", base_url="https://api.test",
+                static_models=["m1", "m1"],
+                free_detection={"method": "allowlist", "model_ids": ["m1"]},
+                setup={"description": "t", "key_hint": "t", "console_url": "https://c.test"},
+                compliance={"note": "t", "reviewed_at": "2026-09-12", "sources": ["https://s.test"]},
+            )

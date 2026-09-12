@@ -126,6 +126,21 @@ class DeclarativeAdapter(ProviderAdapter):
                 rate_limit=override.rate_limit if override else None,
                 raw=raw,
             ))
+
+        # 静态声明的模型并入目录结果（目录端点缺失/为空的平台），
+        # 目录中已有的同名模型以目录元数据为准。
+        catalog_ids = {m.model_id for m in models}
+        for static_id in self.config.static_models:
+            if static_id in catalog_ids:
+                continue
+            override = self.config.model_overrides.get(static_id)
+            models.append(ModelInfo(
+                model_id=static_id,
+                display_name=(override.display_name if override else None) or static_id,
+                category=(override.category if override else None) or "text",
+                context_length=override.context_length if override else None,
+                rate_limit=override.rate_limit if override else None,
+            ))
         return models
 
     def detect_free_from_api(self, model: ModelInfo) -> Optional[dict]:
@@ -177,7 +192,11 @@ class DeclarativeAdapter(ProviderAdapter):
                 # budget in a reasoning field and legitimately return an
                 # empty final content string. Either field proves inference
                 # succeeded; a truly empty message still fails the probe.
-                content = message.get("content") or message.get("reasoning")
+                content = (
+                    message.get("content")
+                    or message.get("reasoning")
+                    or message.get("reasoning_content")
+                )
             except (IndexError, KeyError, TypeError):
                 content = None
             if not isinstance(content, str) or not content.strip():
