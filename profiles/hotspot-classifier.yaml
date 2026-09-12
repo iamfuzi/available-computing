@@ -21,12 +21,15 @@ provider_denylist:
 # Model-id substring exclusions (case-insensitive). Applied per candidate,
 # also as a hard filter. Use this for model families you never want, regardless
 # of which provider hosts them.
+#
+# 2026-09-12: 放开 kilo-auto / content-safety / reasoning 三条排除——
+# 当前免费池的聊天模型实际只有智谱一家（OpenRouter 免费层逐个验证后
+# 7 死 2 超时 1 绑定失败；硅基流动免费档全是 embedding/rerank）。
+# 保留它们作为跨供应商兜底：这些模型健康档为 slow，路由排序天然
+# 落在智谱 healthy/slow 之后，只在智谱全灭时才会被选中，平时零流量。
 model_deny_patterns:
   - gemini
   - glm-z1
-  - kilo-auto
-  - content-safety
-  - reasoning
 
 # Fallback budget within a single request. max_attempts caps total upstream
 # tries; max_attempts_per_provider forces the fallback chain to spread across

@@ -182,7 +182,9 @@ class TestRoutingProfiles:
         assert "google" in p.provider_denylist
         assert "gemini" in p.provider_denylist
         assert "gemini" in p.model_deny_patterns
-        assert "reasoning" in p.model_deny_patterns
+        # 2026-09-12: kilo 系排除已放开（跨供应商兜底），仅保留 gemini/glm-z1
+        assert "kilo-auto" not in p.model_deny_patterns
+        assert "reasoning" not in p.model_deny_patterns
         assert p.max_attempts == 3
         assert p.max_attempts_per_provider == 1
 
@@ -207,7 +209,10 @@ class TestRoutingProfiles:
         from services.router import load_profile
         p = load_profile("hotspot-classifier")
         assert p.model_denied("google/gemini-1.5-pro") is True
-        assert p.model_denied("some-reasoning-model") is True
+        assert p.model_denied("glm-z1-flash") is True
+        # kilo 系已放开作为兜底，不再被拒
+        assert p.model_denied("kilo-auto/free") is False
+        assert p.model_denied("some-reasoning-model") is False
         assert p.model_denied("meta-llama/llama-3.3-70b") is False
 
     def test_profile_merges_into_effective_policy(self):
@@ -870,20 +875,26 @@ class TestAutoRoutePolicyFallback:
         db_session.add_all(rows)
         db_session.commit()
 
-    def _profile_policy(self, db_session):
-        from services.router.profiles import load_profile
-        from services.router.policy import effective_routing_policy
+    def _denying_policy(self):
+        """合成策略：deny 掉全部 text 候选（与真实 profile 内容解耦，
+        profile 已于 2026-09-12 放开 kilo 系排除作为跨供应商兜底）。"""
+        from services.router.policy import EffectiveRoutingPolicy
 
-        profile = load_profile("hotspot-classifier")
-        assert profile is not None, "测试环境需能加载 hotspot-classifier profile"
-        return effective_routing_policy(api_key=None, profile=profile)
+        return EffectiveRoutingPolicy(
+            provider_whitelist=frozenset(),
+            provider_blacklist=frozenset(),
+            min_context=None,
+            prefer="latency",
+            fallback_chain=(),
+            model_deny_patterns=frozenset({"kilo-auto", "content-safety", "reasoning"}),
+        )
 
     def test_auto_text_falls_back_to_chat_pool_when_text_denied(self, db_session, sample_channel):
         """auto:text：text 候选全被策略排除时回退聊天池（vision flash 可用）"""
         from services.router.candidates import auto_candidate_models
 
         self._setup_incident_pool(db_session, sample_channel)
-        policy = self._profile_policy(db_session)
+        policy = self._denying_policy()
 
         candidates = auto_candidate_models("text", db_session, policy=policy)
         ids = {m.model_id for m in candidates}
@@ -896,7 +907,7 @@ class TestAutoRoutePolicyFallback:
         from services.router.candidates import auto_candidate_models
 
         # sample_model: test-model-free, text 类, 不在 deny 规则内
-        candidates = auto_candidate_models("fast", db_session, policy=self._profile_policy(db_session))
+        candidates = auto_candidate_models("fast", db_session, policy=self._denying_policy())
         assert candidates and candidates[0].model_id == "test-model-free"
 
     def test_single_route_resolves_auto_text_under_profile(self, db_session, sample_channel):
@@ -904,7 +915,7 @@ class TestAutoRoutePolicyFallback:
         from services.router.candidates import single_route_candidates
 
         self._setup_incident_pool(db_session, sample_channel)
-        candidates, error = single_route_candidates("auto:text", db_session, self._profile_policy(db_session))
+        candidates, error = single_route_candidates("auto:text", db_session, self._denying_policy())
         assert error is None
         assert candidates, "auto:text 应回退到聊天池而非返回空"
         # 健康的 thinking-flash 排在 slow 的 glm-4v-flash 之前
@@ -912,7 +923,11 @@ class TestAutoRoutePolicyFallback:
 
     @pytest.mark.asyncio
     async def test_self_test_auto_text_with_profile_recovers(self, app_client, db_session, sample_channel, auth_headers):
-        """HTTP 层回归：self-test auto:text + hotspot-classifier 在事故池下 ok"""
+        """HTTP 层回归：真实 profile 加载并路由成功（auto:text 不落空）。
+
+        profile 已放开 kilo 系排除（跨供应商兜底），事故池的 text 候选
+        现在直接可选；回退逻辑的回归由上方合成策略单测覆盖。
+        """
         self._setup_incident_pool(db_session, sample_channel)
         resp = await app_client.post(
             "/v1/ac/self-test",
@@ -922,4 +937,3 @@ class TestAutoRoutePolicyFallback:
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is True, body
-        assert body["selected_model"] == "glm-4.1v-thinking-flash"
