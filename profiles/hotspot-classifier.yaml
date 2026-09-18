@@ -30,6 +30,15 @@ provider_denylist:
 model_deny_patterns:
   - gemini
   - glm-z1
+  # OpenRouter 免费层的僵尸/特种模型家族：主动验证时大面积 7 死 2 超时，
+  # 偶尔验证通过进入池子后返回内容无法用于分类/翻译（实测清扫整轮空转）。
+  # 按家族整体排除，新混入的同家族变体一并拦截。
+  - nex-agi
+  - inclusionai
+  - dots-studio
+  - thinkingmachines
+  - poolside
+  - liquid/lfm
 
 # Fallback budget within a single request. max_attempts caps total upstream
 # tries; max_attempts_per_provider forces the fallback chain to spread across
