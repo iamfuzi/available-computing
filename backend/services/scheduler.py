@@ -10,6 +10,7 @@ scheduler = AsyncIOScheduler()
 DEFAULTS = {
     "discovery_interval_hours": 6,
     "probe_interval_hours": 2,
+    "down_recheck_interval_hours": 6,
 }
 
 
@@ -78,6 +79,17 @@ def init_scheduler(get_key_fn=None):
     # Monthly: decommission models that SiliconFlow has officially retired, so
     # the pool doesn't keep entries that fail every call. Runs on day 1 at 04:00
     # to avoid colliding with the daily cleanup (00:00).
+    # 定期重探 down 状态的免费模型：供应商恢复后自动回归池子，
+    # 不再需要人工触发 probe_channel_models（siliconflow Qwen 系
+    # 曾两次因此集体掉线数日）。
+    from services.health import reprobe_down_models
+    scheduler.add_job(
+        reprobe_down_models,
+        IntervalTrigger(hours=_get_setting("down_recheck_interval_hours")),
+        id="reprobe_down",
+        replace_existing=True,
+    )
+
     from services.sf_release_sync import sync_sf_decommissioned_models
     scheduler.add_job(
         sync_sf_decommissioned_models,
@@ -110,6 +122,10 @@ def refresh_scheduler_intervals():
 
     scheduler.reschedule_job("discover_all", trigger=IntervalTrigger(hours=discovery_hours))
     scheduler.reschedule_job("probe_stale", trigger=IntervalTrigger(hours=probe_hours))
+    scheduler.reschedule_job(
+        "reprobe_down",
+        trigger=IntervalTrigger(hours=_get_setting("down_recheck_interval_hours")),
+    )
 
 
 def shutdown_scheduler():

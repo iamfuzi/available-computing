@@ -561,3 +561,64 @@ async def probe_channel_models(
         )
         if index < len(models) - 1:
             await asyncio.sleep(PROBE_INTERVAL_BETWEEN_MODELS_SEC)
+
+
+async def reprobe_down_models() -> int:
+    """Re-probe free models currently marked down, so recovered suppliers
+    return to the pool automatically.
+
+    线上反复出现的问题：免费模型一次探测失败被标 down 后无人复检
+    （心跳只覆盖 idle 模型且受渠道 RPD 预算限制，无 RPD 元数据的渠道
+    整个被跳过），供应商恢复后池子仍瘫痪数日——siliconflow 的 Qwen
+    系两次因此集体掉线，只能人工触发 probe_channel_models 找回。
+    本任务按渠道并发、渠道内串行重探 down 状态的免费模型。
+
+    Returns: 本次实际探测的模型数。
+    """
+    with Session(engine) as session:
+        rows = session.exec(
+            select(Model)
+            .where(Model.is_active == True)  # noqa: E712
+            .where(Model.is_free == True)  # noqa: E712
+            .where(Model.health_status == "down")
+        ).all()
+        channels = {ch.id: ch for ch in session.exec(select(Channel)).all()}
+        from services.crypto import decrypt as _decrypt
+        from api.channels import _get_salt
+        from config import get_admin_password
+
+        salt = _get_salt(session)
+        by_channel: dict[str, list[tuple[Model, str]]] = {}
+        for m in rows:
+            ch = channels.get(m.channel_id)
+            if not ch or not ch.enabled:
+                continue
+            try:
+                key = _decrypt(ch.api_key_enc, get_admin_password(), salt)
+            except Exception:
+                logger.exception("Decrypt channel key failed for down-recheck")
+                continue
+            by_channel.setdefault(m.channel_id, []).append((m, key))
+
+    total = sum(len(items) for items in by_channel.values())
+    if not total:
+        return 0
+    logger.info("Re-probing %d down free models across %d channels", total, len(by_channel))
+
+    channel_semaphore = asyncio.Semaphore(PROBE_GLOBAL_CONCURRENCY)
+
+    async def _probe_channel(items: list[tuple[Model, str]]):
+        async with channel_semaphore:
+            for index, (m, key) in enumerate(items):
+                try:
+                    await active_probe(m, key, "active_recheck")
+                except Exception:
+                    logger.exception("Down-model recheck failed for %s", m.model_id)
+                if index < len(items) - 1:
+                    await asyncio.sleep(PROBE_INTERVAL_BETWEEN_MODELS_SEC)
+
+    await asyncio.gather(
+        *[_probe_channel(items) for items in by_channel.values()],
+        return_exceptions=True,
+    )
+    return total

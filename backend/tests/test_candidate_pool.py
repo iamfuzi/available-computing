@@ -219,3 +219,35 @@ def test_official_review_keeps_kilo_for_integration():
         "review_required",
         None,
     )
+
+
+@pytest.mark.asyncio
+async def test_reprobe_down_models_probes_down_free_models(db_session, sample_channel, monkeypatch):
+    """down 免费模型被重探；healthy/付费/down 渠道禁用的不探"""
+    from services import health as health_service
+    from models import Model, Channel
+    from unittest.mock import AsyncMock
+
+    down_free = Model(channel_id=sample_channel.id, model_id="down-free",
+                      category="text", is_free=True, is_active=True, health_status="down")
+    healthy_free = Model(channel_id=sample_channel.id, model_id="healthy-free",
+                         category="text", is_free=True, is_active=True, health_status="healthy")
+    down_paid = Model(channel_id=sample_channel.id, model_id="down-paid",
+                      category="text", is_free=False, is_active=True, health_status="down")
+    db_session.add_all([down_free, healthy_free, down_paid])
+    db_session.commit()
+
+    probed = []
+
+    async def fake_active_probe(model, key, method="active_recheck", **kw):
+        probed.append(model.model_id)
+
+    import services.health as h
+    monkeypatch.setattr(h, "active_probe", fake_active_probe)
+    # redirect module Session/engine to test db
+    monkeypatch.setattr(h, "Session", lambda e: db_session)
+    monkeypatch.setattr(h, "engine", db_session.get_bind())
+
+    count = await h.reprobe_down_models()
+    assert count == 1
+    assert probed == ["down-free"]
