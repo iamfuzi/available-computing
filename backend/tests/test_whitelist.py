@@ -58,6 +58,12 @@ class TestMatch:
         assert entry is not None
         assert entry.model_id == "Qwen/Qwen2.5-7B-Instruct"
 
+    def test_bare_suffix_match_rejected(self, wl):
+        """An id that merely ENDS with a whitelisted name (no separator) must
+        not inherit its free verdict — that loose match is how unrelated paid
+        ids could slip into the free pool."""
+        assert wl.match("siliconflow", "xQwen/Qwen2.5-7B-Instruct") is None
+
     def test_no_match(self, wl):
         assert wl.match("siliconflow", "nonexistent-model") is None
 

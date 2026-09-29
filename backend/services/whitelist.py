@@ -41,8 +41,15 @@ class WhitelistManager:
         provider = self._data.get("providers", {}).get(provider_id, {})
         for entry in provider.get("free_models", []):
             entry_id = entry.get("id", "")
-            # Exact match or suffix match (e.g. "glm-4-flash" matches "models/glm-4-flash")
-            if model_id == entry_id or model_id.endswith("/" + entry_id) or model_id.endswith(entry_id):
+            # Exact match or separator-prefixed match (e.g. "glm-4-flash"
+            # matches "models/glm-4-flash"). A bare suffix match is rejected on
+            # purpose: it admitted unrelated ids that merely end with a
+            # whitelisted name. Paid-prefixed variants such as "LoRA/<base>" /
+            # "Pro/<base>" can still end with "/<base-model>" when the entry id
+            # itself contains a slash — the adapter's prefix rule is the gate
+            # that returns a definitive paid verdict before the whitelist is
+            # consulted (see discovery._determine_free Step 2).
+            if model_id == entry_id or model_id.endswith("/" + entry_id):
                 return WhitelistEntry(
                     model_id=entry_id,
                     free_type=entry.get("free_type", "permanent"),

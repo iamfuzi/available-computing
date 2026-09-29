@@ -1,5 +1,5 @@
-version: "2026.05.07"
-updated_at: "2026-05-07"
+version: "2026.09.29"
+updated_at: "2026-09-29"
 
 providers:
   groq:
@@ -17,11 +17,12 @@ providers:
       # Non-Pro/ models not listed here are treated as unknown (not free).
       - id: "Qwen/Qwen2.5-7B-Instruct"
         free_type: permanent
-        notes: "永久免费"
-      - id: "Qwen/Qwen2.5-14B-Instruct"
-        free_type: permanent
-      - id: "Qwen/Qwen2.5-72B-Instruct"
-        free_type: permanent
+        notes: "永久免费（2026-09-29 账单核实：7.07M tokens 实收 ¥0；同账单中 14B/72B 及全部 LoRA/ 变体均在收费）"
+        # REMOVED 2026-09-29 (billing evidence): Qwen/Qwen2.5-14B-Instruct and
+        # Qwen/Qwen2.5-72B-Instruct appeared as PAID lines in the SiliconFlow
+        # bill while AC still routed/probed them as free. They are no longer
+        # whitelisted; discovery now marks them unknown (never probed, never
+        # routed). Re-add only with fresh official confirmation of free status.
       - id: "BAAI/bge-m3"
         free_type: permanent
         category: embedding
