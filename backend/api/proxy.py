@@ -356,6 +356,38 @@ def _passive_channel_call_count(session: Session, channel_id: str, since: dateti
     ).all())
 
 
+# Per-channel provider RPM overrides (Setting key ``provider_rpm:<channel_id>``),
+# cached briefly to keep the per-request budget check cheap. Free-tier limits
+# vary wildly per provider (e.g. agnes ≈ 10 RPM), so PROXY_PROVIDER_RPM is
+# only the global default and each channel can override it.
+_provider_rpm_cache: dict[str, tuple[float, int | None]] = {}
+_PROVIDER_RPM_CACHE_TTL_SECONDS = 30.0
+
+
+def _channel_rpm_override(session: Session, channel_id: str) -> int | None:
+    now = time.monotonic()
+    cached = _provider_rpm_cache.get(channel_id)
+    if cached and cached[0] > now:
+        return cached[1]
+    from models import Setting
+
+    row = session.get(Setting, f"provider_rpm:{channel_id}")
+    raw = row.value if row else None
+    try:
+        rpm = int(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        rpm = None
+    _provider_rpm_cache[channel_id] = (now + _PROVIDER_RPM_CACHE_TTL_SECONDS, rpm)
+    return rpm
+
+
+def _effective_provider_rpm(session: Session, channel_id: str) -> int:
+    override = _channel_rpm_override(session, channel_id)
+    if override is not None and override > 0:
+        return override
+    return PROXY_PROVIDER_RPM
+
+
 def _check_model_budget(model: Model, session: Session) -> None:
     """Skip a model before calling upstream when local request budget is full.
 
@@ -384,9 +416,10 @@ def _check_model_budget(model: Model, session: Session) -> None:
             tomorrow = day_start + timedelta(days=1)
             raise ModelBudgetExceeded(max(1, int((tomorrow - now).total_seconds())), "local_rpd_exceeded")
 
-    if PROXY_PROVIDER_RPM > 0:
+    provider_rpm = _effective_provider_rpm(session, model.channel_id)
+    if provider_rpm > 0:
         since = now - timedelta(seconds=60)
-        if _passive_channel_call_count(session, model.channel_id, since) >= PROXY_PROVIDER_RPM:
+        if _passive_channel_call_count(session, model.channel_id, since) >= provider_rpm:
             raise ModelBudgetExceeded(60, "local_provider_rpm_exceeded")
 
 

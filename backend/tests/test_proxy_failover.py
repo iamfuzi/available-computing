@@ -340,3 +340,25 @@ class TestRPMThrottle:
         with pytest.raises(proxy.ModelBudgetExceeded) as exc:
             proxy._check_model_budget(sample_model, db_session)
         assert exc.value.reason == "local_provider_rpm_exceeded"
+
+    def test_per_channel_rpm_override_beats_global_default(
+        self, db_session, sample_model, sample_channel, monkeypatch
+    ):
+        """Setting provider_rpm:<channel_id> 覆盖全局默认（如 agnes=10）。"""
+        from models import Setting
+
+        import api.proxy as proxy
+
+        monkeypatch.setattr(proxy, "PROXY_PROVIDER_RPM", 60)
+        proxy._provider_rpm_cache.clear()
+        db_session.add(
+            Setting(key=f"provider_rpm:{sample_channel.id}", value="10")
+        )
+        db_session.commit()
+        # 全局 60 未触发，但 channel 覆盖 10 已被 11 次调用打满
+        self._seed_passive(db_session, sample_model, count=11)
+
+        with pytest.raises(proxy.ModelBudgetExceeded) as exc:
+            proxy._check_model_budget(sample_model, db_session)
+        assert exc.value.reason == "local_provider_rpm_exceeded"
+        proxy._provider_rpm_cache.clear()
