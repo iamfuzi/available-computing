@@ -48,11 +48,13 @@ from services.router import (
     resolve_smart_model as _resolve_smart_model,  # noqa: F401 — re-exported for tests
     single_route_candidates as _single_route_candidates,
     try_bind_model as _try_bind_model,
+    category_candidates as _category_candidates,
 )
 from services.router.scoring import (
     is_cooling_down as _is_cooling_down,
     is_pool_eligible as _is_pool_eligible,
     recent_success_rate as _recent_success_rate,
+    route_score_key as _route_score_key,
 )
 from config import (
     PROXY_RATE_WINDOW_SECONDS,
@@ -60,6 +62,8 @@ from config import (
     PROXY_ADMIN_RATE_LIMIT,
     PROXY_IP_FALLBACK_RATE_LIMIT,
     PROXY_MODEL_CONCURRENCY_LIMIT,
+    PROXY_EMBEDDING_CONCURRENCY_LIMIT,
+    PROXY_SLOT_QUEUE_TIMEOUT_SECONDS,
 )
 
 router = APIRouter()
@@ -70,8 +74,13 @@ logger = logging.getLogger(__name__)
 # the proxy module (not the router package) because it bounds the HTTP loop.
 _MAX_UPSTREAM_ATTEMPTS = 50
 
-# Only transient statuses should spend another provider's quota. Caller or
-# policy errors are deterministic across providers and must return immediately.
+# Transient statuses spend the next candidate's quota immediately. Non-
+# transient rejections (400/401/403/404…) are ALSO walked down the chain:
+# the most common 400 cause in the free pool is a model-specific constraint
+# (max_tokens over a model's output cap, unsupported params) that other
+# candidates accept fine. The exhausted tail replays the first rejection
+# verbatim when no candidate accepts the request, so true caller errors still
+# surface with their real upstream status.
 _RETRYABLE_UPSTREAM_STATUSES = {408, 429, 500, 502, 503, 504}
 
 _proxy_requests: dict[str, list[float]] = {}
@@ -162,17 +171,40 @@ def _check_api_key_policy_rate_limit(api_key: ApiKey):
     _proxy_requests[scope] = attempts
 
 
-def _model_slot_key(channel: Channel, model: Model) -> str:
-    return f"{channel.provider_type}:{channel.id}:{model.model_id}"
+def _model_slot_key(channel: Channel, model: Model, category: str = "chat") -> str:
+    return f"{category}:{channel.provider_type}:{channel.id}:{model.model_id}"
 
 
-async def _try_acquire_model_slot(channel: Channel, model: Model) -> tuple[str, bool]:
-    key = _model_slot_key(channel, model)
-    sem = _model_semaphores.setdefault(key, asyncio.Semaphore(PROXY_MODEL_CONCURRENCY_LIMIT))
-    if getattr(sem, "_value", 0) <= 0:
+def _slot_limit(category: str) -> int:
+    if category in ("embedding", "rerank"):
+        return max(1, PROXY_EMBEDDING_CONCURRENCY_LIMIT)
+    return max(1, PROXY_MODEL_CONCURRENCY_LIMIT)
+
+
+async def _try_acquire_model_slot(
+    channel: Channel, model: Model, category: str = "chat"
+) -> tuple[str, bool]:
+    """Acquire a per-(category, channel, model) concurrency slot.
+
+    Requests queue for up to PROXY_SLOT_QUEUE_TIMEOUT_SECONDS instead of
+    failing fast: embedding bursts from a single caller used to mass-503
+    against a limit of 2, even though every request would have succeeded
+    a fraction of a second later. Fail-fast is kept for a zero timeout.
+    """
+    key = _model_slot_key(channel, model, category)
+    sem = _model_semaphores.setdefault(key, asyncio.Semaphore(_slot_limit(category)))
+    if PROXY_SLOT_QUEUE_TIMEOUT_SECONDS <= 0:
+        if getattr(sem, "_value", 0) <= 0:
+            return key, False
+        await sem.acquire()
+        return key, True
+    try:
+        await asyncio.wait_for(
+            sem.acquire(), timeout=PROXY_SLOT_QUEUE_TIMEOUT_SECONDS
+        )
+        return key, True
+    except asyncio.TimeoutError:
         return key, False
-    await sem.acquire()
-    return key, True
 
 
 def _release_model_slot(slot_key: str | None):
@@ -784,6 +816,9 @@ async def chat_completions(
     """
     ip = request.client.host if request.client else "unknown"
     request_id = get_request_id(request)
+    from services.usage import record_usage
+
+    _usage_key_id = auth.id if auth is not None else "admin"
     try:
         _check_proxy_rate_limit(
             ip,
@@ -792,6 +827,7 @@ async def chat_completions(
             auth,
         )
     except ProxyRateLimitExceeded as exc:
+        record_usage(_usage_key_id, "chat", "rejected_local")
         return _make_ac_error(
             429,
             "Local proxy rate limit exceeded",
@@ -880,6 +916,9 @@ async def chat_completions(
     busy_models: list[str] = []
     budget_limited: list[str] = []
     budget_retry_after: int | None = None
+    # (status, error_type, error_code) of the first hard upstream rejection;
+    # replayed verbatim if the whole chain rejects the request.
+    first_rejection: tuple[int, str, str] | None = None
     failed_channels: set[str] = set()
 
     # Iterate the full candidate list but stop once we have made
@@ -959,6 +998,7 @@ async def chat_completions(
                     request_id, channel.provider_type, model.model_id,
                     int((time.monotonic() - start) * 1000), upstream_attempts_made,
                 )
+                record_usage(_usage_key_id, "chat", "success")
                 return StreamingResponse(
                     _proxy_stream(response, client, model.id, channel.id, key, slot_key),
                     media_type="text/event-stream",
@@ -1019,16 +1059,9 @@ async def chat_completions(
                     if response.status_code in (401, 403)
                     else "invalid_request_error"
                 )
-                return _make_ac_error(
-                    response.status_code,
-                    f"Upstream rejected the request with status {response.status_code}",
-                    error_type,
-                    error_code,
-                    attempted_models=attempted,
-                    route=original_model,
-                    request_id=request_id,
-                    scope="upstream",
-                )
+                if first_rejection is None:
+                    first_rejection = (response.status_code, error_type, error_code)
+                continue
             continue
 
         r = None
@@ -1070,6 +1103,7 @@ async def chat_completions(
                 "upstream ok request_id=%s provider=%s model=%s status=200 ms=%s attempt=%d",
                 request_id, channel.provider_type, model.model_id, ms, upstream_attempts_made,
             )
+            record_usage(_usage_key_id, "chat", "success")
             return JSONResponse(
                 content=response_payload,
                 status_code=200,
@@ -1120,19 +1154,15 @@ async def chat_completions(
                 if r.status_code in (401, 403)
                 else "invalid_request_error"
             )
-            return _make_ac_error(
-                r.status_code,
-                f"Upstream rejected the request with status {r.status_code}",
-                error_type,
-                error_code,
-                attempted_models=attempted,
-                route=original_model,
-                request_id=request_id,
-                scope="upstream",
-            )
+            if first_rejection is None:
+                first_rejection = (r.status_code, error_type, error_code)
+            continue
         continue
 
     body.model = original_model
+    record_usage(
+        _usage_key_id, "chat", "fail" if attempted else "rejected_local"
+    )
     logger.warning(
         "route exhausted request_id=%s route=%s attempted=%s busy=%d budget_limited=%d last_status=%s",
         request_id, original_model, ",".join(attempted) or "(none)",
@@ -1170,6 +1200,22 @@ async def chat_completions(
             route=original_model,
             request_id=request_id,
         )
+    if first_rejection is not None:
+        # Every candidate rejected the request outright (e.g. a max_tokens
+        # value no free model supports). Replay the first rejection verbatim
+        # so the caller sees the real upstream status instead of a generic
+        # routing_exhausted.
+        reject_status, reject_type, reject_code = first_rejection
+        return _make_ac_error(
+            reject_status,
+            f"Upstream rejected the request with status {reject_status}",
+            reject_type,
+            reject_code,
+            attempted_models=attempted,
+            route=original_model,
+            request_id=request_id,
+            scope="upstream",
+        )
     # Every candidate has been tried without success — the routing policy was
     # satisfied (candidates existed) but none could complete the request. Map
     # the last upstream status to a standard error type/code.
@@ -1202,13 +1248,17 @@ async def _proxy_passthrough(
     payload: dict,
     session: Session,
     requested_route: str | None = None,
+    attempted_models: list[str] | None = None,
 ):
     """Forward a non-chat request to ``{base_url}/<path_suffix>`` and return the
     upstream response verbatim. Used by /v1/embeddings and /v1/rerank.
 
     Mirrors the chat router's health/error bookkeeping (5xx → slow,
     401/403 → billing-failure count, success → passive healthy record).
+    ``attempted_models`` lets the category-failover wrapper surface the full
+    candidate chain in diagnostics instead of just the winning binding.
     """
+    trace = attempted_models if attempted_models is not None else [model.model_id]
     base_url = channel.base_url or adapter.default_base_url
     route = requested_route or model.model_id
     url = f"{base_url}/{path_suffix}"
@@ -1224,7 +1274,7 @@ async def _proxy_passthrough(
             "Upstream request timed out",
             "upstream_error",
             "upstream_timeout",
-            attempted_models=[model.model_id],
+            attempted_models=trace,
             route=route,
         )
     except httpx.RequestError:
@@ -1234,7 +1284,7 @@ async def _proxy_passthrough(
             "Upstream network request failed",
             "upstream_error",
             "upstream_network_error",
-            attempted_models=[model.model_id],
+            attempted_models=trace,
             route=route,
         )
     ms = int((time.monotonic() - start) * 1000)
@@ -1250,9 +1300,9 @@ async def _proxy_passthrough(
                 route=route,
                 selected_model=model.model_id,
                 selected_provider=channel.provider_type,
-                attempted_models=[model.model_id],
+                attempted_models=trace,
                 selected_verified_at=model.last_verified_at,
-                fallback_triggered=False,
+                fallback_triggered=len(trace) > 1,
             ),
         )
     # See chat router: 429 cools the model down; 401/403 counts toward
@@ -1266,7 +1316,7 @@ async def _proxy_passthrough(
             "rate_limit_error",
             "model_rate_limited",
             retry_after=retry_after,
-            attempted_models=[model.model_id],
+            attempted_models=trace,
             route=route,
         )
     if r.status_code >= 500:
@@ -1280,7 +1330,153 @@ async def _proxy_passthrough(
         f"Upstream returned {r.status_code}",
         "upstream_error",
         code,
-        attempted_models=[model.model_id],
+        attempted_models=trace,
+        route=route,
+    )
+
+
+def _resolve_category_bindings(
+    model_id: str,
+    category: str,
+    session: Session,
+    policy,
+    allow_auto: bool = False,
+    limit: int = 3,
+):
+    """Primary binding first, then same-category fallbacks.
+
+    A concrete id previously resolved to exactly one binding, so any upstream
+    hiccup on it (5xx, cooldown, saturation) failed the whole request. Keep
+    the tolerant primary match, then append other routable candidates of the
+    same category (best route score first) for the failover wrapper.
+    """
+    bindings: list[tuple] = []
+    seen: set[str] = set()
+
+    def _add(resolved):
+        if resolved and resolved[0] and resolved[0].id not in seen:
+            bindings.append(resolved)
+            seen.add(resolved[0].id)
+
+    if allow_auto and model_id.startswith("auto:"):
+        _add(_resolve_auto_category_model(category, session, policy))
+    else:
+        _add(_resolve_category_model(model_id, category, session, policy))
+        if not bindings:
+            # A concrete id with no match in this category is a caller bug
+            # (e.g. a chat model on /v1/embeddings) — surface 404 rather than
+            # silently serving a different model. Fallbacks only kick in
+            # after the requested model itself resolved but failed upstream.
+            return []
+
+    for model in sorted(
+        _category_candidates(session, category, policy),
+        key=lambda m: _route_score_key(m, session),
+    ):
+        if len(bindings) >= max(1, limit):
+            break
+        if model.id in seen:
+            continue
+        bound = _try_bind_model(model, session)
+        if bound:
+            bindings.append((model, *bound))
+            seen.add(model.id)
+    return bindings
+
+
+async def _passthrough_with_failover(
+    *,
+    category: str,
+    model_id: str,
+    path_suffix: str,
+    build_payload,
+    session: Session,
+    policy,
+    route: str,
+    allow_auto: bool = False,
+    auth=None,
+):
+    """Slot-acquire + passthrough with same-category candidate failover.
+
+    Shared by /v1/embeddings, /v1/rerank and /v1/images/generations: resolve
+    up to 3 bindings, walk them until one returns 200, and fall back to local
+    rejections (busy / over-budget) when nothing was attempted upstream.
+    """
+    from services.usage import record_usage
+
+    key_id = auth.id if auth is not None else "admin"
+
+    bindings = _resolve_category_bindings(
+        model_id, category, session, policy, allow_auto=allow_auto
+    )
+    if not bindings:
+        record_usage(key_id, category, "rejected_local")
+        return _make_ac_error(
+            404,
+            f"No available {category} model matching '{model_id}'",
+            "invalid_request_error",
+            "model_not_found",
+            param="model",
+            route=route,
+        )
+
+    attempted: list[str] = []
+    busy_models: list[str] = []
+    budget_retry_after = 0
+    first_error = None
+    for model, channel, adapter, key in bindings:
+        try:
+            _check_model_budget(model, session)
+        except ModelBudgetExceeded as exc:
+            budget_retry_after = max(budget_retry_after, exc.retry_after)
+            continue
+        slot_key, acquired = await _try_acquire_model_slot(
+            channel, model, category=category
+        )
+        if not acquired:
+            busy_models.append(model.model_id)
+            continue
+        attempted.append(f"{channel.provider_type}/{model.model_id}")
+        try:
+            result = await _proxy_passthrough(
+                model,
+                channel,
+                adapter,
+                key,
+                path_suffix,
+                build_payload(model),
+                session,
+                requested_route=route,
+                attempted_models=list(attempted),
+            )
+        finally:
+            _release_model_slot(slot_key)
+        if isinstance(result, JSONResponse) and result.status_code == 200:
+            record_usage(key_id, category, "success")
+            return result
+        if first_error is None:
+            first_error = result
+
+    if attempted:
+        record_usage(key_id, category, "fail")
+        return first_error
+    record_usage(key_id, category, "rejected_local")
+    if busy_models:
+        return _make_ac_error(
+            503,
+            "All candidate models are currently busy",
+            "service_unavailable",
+            "all_candidates_busy",
+            attempted_models=busy_models,
+            route=route,
+        )
+    return _make_ac_error(
+        429,
+        "All candidate models are locally rate limited before upstream call",
+        "rate_limit_error",
+        "local_model_budget_exceeded",
+        retry_after=budget_retry_after or None,
+        attempted_models=[binding[0].model_id for binding in bindings],
         route=route,
     )
 
@@ -1332,63 +1528,28 @@ async def image_generations(
     if profile_error is not None:
         return profile_error
     policy = _effective_routing_policy(auth, body.routing_policy, profile)
-    if body.model == "auto:image":
-        resolved = _resolve_auto_category_model("image", session, policy)
-    else:
-        resolved = _resolve_category_model(body.model, "image", session, policy)
-    model, channel, adapter, key = resolved
-    if not model:
-        return _make_ac_error(
-            404,
-            f"No available image model matching '{body.model}'",
-            "invalid_request_error",
-            "model_not_found",
-            param="model",
-            route=body.model,
-        )
-    try:
-        _check_model_budget(model, session)
-    except ModelBudgetExceeded as exc:
-        return _make_ac_error(
-            429,
-            "Model is locally rate limited before upstream call",
-            "rate_limit_error",
-            "local_model_budget_exceeded",
-            retry_after=exc.retry_after,
-            attempted_models=[model.model_id],
-            route=body.model,
-        )
-    slot_key, acquired = await _try_acquire_model_slot(channel, model)
-    if not acquired:
-        return _make_ac_error(
-            503,
-            "All candidate models are currently busy",
-            "service_unavailable",
-            "all_candidates_busy",
-            attempted_models=[model.model_id],
-            route=body.model,
-        )
 
-    payload = {"model": model.model_id, "prompt": body.prompt}
-    for field in ("quality", "size", "watermark_enabled"):
-        value = getattr(body, field)
-        if value is not None:
-            payload[field] = value
-    if body.user is not None:
-        payload["user_id"] = body.user
-    try:
-        return await _proxy_passthrough(
-            model,
-            channel,
-            adapter,
-            key,
-            "images/generations",
-            payload,
-            session,
-            requested_route=body.model,
-        )
-    finally:
-        _release_model_slot(slot_key)
+    def _image_payload(model):
+        payload = {"model": model.model_id, "prompt": body.prompt}
+        for field in ("quality", "size", "watermark_enabled"):
+            value = getattr(body, field)
+            if value is not None:
+                payload[field] = value
+        if body.user is not None:
+            payload["user_id"] = body.user
+        return payload
+
+    return await _passthrough_with_failover(
+        category="image",
+        model_id=body.model,
+        path_suffix="images/generations",
+        build_payload=_image_payload,
+        session=session,
+        policy=policy,
+        route=body.model,
+        allow_auto=True,
+        auth=auth,
+    )
 
 
 @router.post("/embeddings")
@@ -1401,7 +1562,8 @@ async def embeddings(
     """OpenAI-compatible embeddings.
 
     Resolves ``model`` against the embedding candidate pool (concrete id only,
-    no auto-routing) and forwards to the upstream ``/embeddings`` endpoint.
+    no auto-routing) and forwards to the upstream ``/embeddings`` endpoint,
+    falling back to other embedding candidates on upstream failure.
     """
     ip = request.client.host if request.client else "unknown"
     try:
@@ -1420,46 +1582,24 @@ async def embeddings(
             retry_after=exc.retry_after,
             route=body.model,
         )
-    resolved = _resolve_category_model(
-        body.model, "embedding", session, _effective_routing_policy(auth)
+
+    def _embedding_payload(model):
+        payload = _build_simple_payload(
+            body, include=["input", "encoding_format"]
+        )
+        payload["model"] = model.model_id
+        return payload
+
+    return await _passthrough_with_failover(
+        category="embedding",
+        model_id=body.model,
+        path_suffix="embeddings",
+        build_payload=_embedding_payload,
+        session=session,
+        policy=_effective_routing_policy(auth),
+        route=body.model,
+        auth=auth,
     )
-    model, channel, adapter, key = resolved
-    if not model:
-        return _make_ac_error(
-            404,
-            f"No available embedding model matching '{body.model}'",
-            "invalid_request_error",
-            "model_not_found",
-            param="model",
-            route=body.model,
-        )
-    try:
-        _check_model_budget(model, session)
-    except ModelBudgetExceeded as exc:
-        return _make_ac_error(
-            429,
-            "Model is locally rate limited before upstream call",
-            "rate_limit_error",
-            "local_model_budget_exceeded",
-            retry_after=exc.retry_after,
-            attempted_models=[model.model_id],
-            route=body.model,
-        )
-    slot_key, acquired = await _try_acquire_model_slot(channel, model)
-    if not acquired:
-        return _make_ac_error(
-            503,
-            "All candidate models are currently busy",
-            "service_unavailable",
-            "all_candidates_busy",
-            attempted_models=[model.model_id],
-            route=body.model,
-        )
-    payload = _build_simple_payload(body, include=["input", "encoding_format"])
-    try:
-        return await _proxy_passthrough(model, channel, adapter, key, "embeddings", payload, session)
-    finally:
-        _release_model_slot(slot_key)
 
 
 @router.post("/rerank")
@@ -1473,7 +1613,8 @@ async def rerank(
 
     NOTE: ``/rerank`` is NOT an OpenAI standard endpoint — it follows the
     SiliconFlow/Cohere convention. Resolves ``model`` against the rerank
-    candidate pool and forwards to the upstream ``/rerank`` endpoint.
+    candidate pool and forwards to the upstream ``/rerank`` endpoint,
+    falling back to other rerank candidates on upstream failure.
     """
     ip = request.client.host if request.client else "unknown"
     try:
@@ -1492,43 +1633,21 @@ async def rerank(
             retry_after=exc.retry_after,
             route=body.model,
         )
-    resolved = _resolve_category_model(
-        body.model, "rerank", session, _effective_routing_policy(auth)
+
+    def _rerank_payload(model):
+        payload = _build_simple_payload(
+            body, include=["query", "documents", "top_n", "return_documents"]
+        )
+        payload["model"] = model.model_id
+        return payload
+
+    return await _passthrough_with_failover(
+        category="rerank",
+        model_id=body.model,
+        path_suffix="rerank",
+        build_payload=_rerank_payload,
+        session=session,
+        policy=_effective_routing_policy(auth),
+        route=body.model,
+        auth=auth,
     )
-    model, channel, adapter, key = resolved
-    if not model:
-        return _make_ac_error(
-            404,
-            f"No available rerank model matching '{body.model}'",
-            "invalid_request_error",
-            "model_not_found",
-            param="model",
-            route=body.model,
-        )
-    try:
-        _check_model_budget(model, session)
-    except ModelBudgetExceeded as exc:
-        return _make_ac_error(
-            429,
-            "Model is locally rate limited before upstream call",
-            "rate_limit_error",
-            "local_model_budget_exceeded",
-            retry_after=exc.retry_after,
-            attempted_models=[model.model_id],
-            route=body.model,
-        )
-    slot_key, acquired = await _try_acquire_model_slot(channel, model)
-    if not acquired:
-        return _make_ac_error(
-            503,
-            "All candidate models are currently busy",
-            "service_unavailable",
-            "all_candidates_busy",
-            attempted_models=[model.model_id],
-            route=body.model,
-        )
-    payload = _build_simple_payload(body, include=["query", "documents", "top_n", "return_documents"])
-    try:
-        return await _proxy_passthrough(model, channel, adapter, key, "rerank", payload, session)
-    finally:
-        _release_model_slot(slot_key)

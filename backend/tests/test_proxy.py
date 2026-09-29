@@ -1007,10 +1007,14 @@ class TestAutoRouting:
         assert error["retryable"] is True
 
     @pytest.mark.asyncio
-    async def test_non_retryable_400_does_not_spend_fallback_quota(
+    async def test_non_retryable_400_walks_chain_then_replays_first_rejection(
         self, app_client, auth_headers, db_session, sample_channel
     ):
-        """A deterministic caller error returns after the first upstream."""
+        """400 在候选链上换道重试；全部拒绝时回放首个 400。
+
+        免费池 400 最常见的原因是模型个性约束（max_tokens 超过某模型
+        输出上限），换一家供应商往往就能成功；确实全部拒绝时，调用方
+        仍看到真实的上游 400 而非笼统的 routing_exhausted。"""
         from models import Model
 
         first = Model(
@@ -1050,9 +1054,11 @@ class TestAutoRouting:
             )
 
         assert resp.status_code == 400
-        assert mock_cm.post.call_count == 1
+        # 两个候选都被尝试（换道），最终回放首个 400
+        assert mock_cm.post.call_count == 2
         error = resp.json()["error"]
         assert error["type"] == "invalid_request_error"
+        assert error["code"] == "upstream_non_retryable_error"
         assert error["code"] == "upstream_non_retryable_error"
         assert error["retryable"] is False
 

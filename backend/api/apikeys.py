@@ -190,3 +190,65 @@ def delete_api_key(
         raise HTTPException(404, "API key not found")
     session.delete(k)
     session.commit()
+
+
+@router.get("/usage")
+def key_usage_summary(
+    days: int = 7,
+    session: Session = Depends(get_session),
+    _=Depends(verify_token),
+):
+    """Per-API-key daily usage summary from the keyusageday table.
+
+    Returns one row per (day, key, category, outcome) for the last ``days``
+    days plus per-key totals, so anomalous volumes (e.g. a client hammering
+    /v1/embeddings) are visible at a glance. ``pending`` carries the
+    not-yet-flushed in-process counters.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from models import KeyUsageDay
+    from services.usage import pending_count
+
+    days = max(1, min(90, days))
+    since = (datetime.now(timezone.utc) - timedelta(days=days - 1)).strftime(
+        "%Y-%m-%d"
+    )
+    rows = session.exec(
+        select(KeyUsageDay)
+        .where(KeyUsageDay.day >= since)
+        .order_by(KeyUsageDay.day.desc(), KeyUsageDay.api_key_id)
+    ).all()
+
+    key_names = {k.id: k.name for k in session.exec(select(ApiKey)).all()}
+    totals: dict = {}
+    detail = []
+    for row in rows:
+        detail.append(
+            {
+                "day": row.day,
+                "api_key_id": row.api_key_id,
+                "key_name": key_names.get(row.api_key_id),
+                "category": row.category,
+                "outcome": row.outcome,
+                "count": row.count,
+            }
+        )
+        bucket = totals.setdefault(
+            row.api_key_id,
+            {
+                "api_key_id": row.api_key_id,
+                "key_name": key_names.get(row.api_key_id),
+                "success": 0,
+                "fail": 0,
+                "rejected_local": 0,
+            },
+        )
+        bucket[row.outcome] = bucket.get(row.outcome, 0) + row.count
+
+    return {
+        "days": days,
+        "totals": list(totals.values()),
+        "detail": detail,
+        "pending_flush": pending_count(),
+    }

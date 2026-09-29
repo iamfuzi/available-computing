@@ -82,6 +82,16 @@ PROXY_API_KEY_RATE_LIMIT = int(os.environ.get("PROXY_API_KEY_RATE_LIMIT", "120")
 PROXY_ADMIN_RATE_LIMIT = int(os.environ.get("PROXY_ADMIN_RATE_LIMIT", "600"))
 PROXY_IP_FALLBACK_RATE_LIMIT = int(os.environ.get("PROXY_IP_FALLBACK_RATE_LIMIT", "600"))
 PROXY_MODEL_CONCURRENCY_LIMIT = int(os.environ.get("PROXY_MODEL_CONCURRENCY_LIMIT", "2"))
+# Embedding/rerank requests are sub-second and cheap; give them their own,
+# higher per-model concurrency budget instead of sharing the chat limit.
+PROXY_EMBEDDING_CONCURRENCY_LIMIT = int(
+    os.environ.get("PROXY_EMBEDDING_CONCURRENCY_LIMIT", "4")
+)
+# How long a request may queue for a busy model slot before giving up with
+# all_candidates_busy. 0 keeps the old fail-fast behaviour.
+PROXY_SLOT_QUEUE_TIMEOUT_SECONDS = float(
+    os.environ.get("PROXY_SLOT_QUEUE_TIMEOUT_SECONDS", "15")
+)
 
 # SiliconFlow release-notes sync: periodically decommission models that the
 # upstream has officially retired, so the pool doesn't keep dead entries that

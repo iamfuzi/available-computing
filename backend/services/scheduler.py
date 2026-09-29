@@ -98,6 +98,16 @@ def init_scheduler(get_key_fn=None):
         replace_existing=True,
     )
 
+    # Flush in-process per-key usage counters into the keyusageday table.
+    # Frequent + idempotent (upsert), so a missed run only delays visibility.
+    from services.usage import flush_usage
+    scheduler.add_job(
+        flush_usage,
+        IntervalTrigger(seconds=60),
+        id="flush_usage",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
     # Run an initial probe shortly after startup. IntervalTrigger's first run

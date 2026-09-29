@@ -5,8 +5,10 @@ from .setting import Setting
 from .apikey import ApiKey
 from .candidate_provider import CandidateProvider, CandidateSourceState
 from .notification import Notification
+from .usage import KeyUsageDay
 
 __all__ = [
     "Channel", "Model", "HealthRecord", "Setting", "ApiKey",
     "CandidateProvider", "CandidateSourceState", "Notification",
+    "KeyUsageDay",
 ]
