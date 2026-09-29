@@ -66,6 +66,7 @@ from config import (
     PROXY_SLOT_QUEUE_TIMEOUT_SECONDS,
     PROXY_DEFAULT_MODEL_RPM,
     PROXY_PROVIDER_RPM,
+    PROXY_PASSTHROUGH_TIMEOUT_SECONDS,
 )
 
 router = APIRouter()
@@ -1329,12 +1330,13 @@ async def _proxy_passthrough(
     route = requested_route or model.model_id
     url = f"{base_url}/{path_suffix}"
     headers = _upstream_headers(adapter, key)
+    passthrough_timeout_ms = int(PROXY_PASSTHROUGH_TIMEOUT_SECONDS * 1000)
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=PROXY_PASSTHROUGH_TIMEOUT_SECONDS) as client:
             r = await client.post(url, json=payload, headers=headers)
     except httpx.TimeoutException:
-        await record_passive_health(model.id, 120000, "timeout", channel.id, key)
+        await record_passive_health(model.id, passthrough_timeout_ms, "timeout", channel.id, key)
         return _make_ac_error(
             504,
             "Upstream request timed out",

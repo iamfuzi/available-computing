@@ -102,6 +102,13 @@ PROXY_SLOT_QUEUE_TIMEOUT_SECONDS = float(
 #     channel (they share the upstream API key's real limit). 0 = off.
 PROXY_DEFAULT_MODEL_RPM = int(os.environ.get("PROXY_DEFAULT_MODEL_RPM", "0"))
 PROXY_PROVIDER_RPM = int(os.environ.get("PROXY_PROVIDER_RPM", "0"))
+# Upstream timeout for passthrough endpoints (embeddings/rerank/images).
+# These normally answer in well under 2s; a 120s hold keeps the model's
+# concurrency slots hostage during upstream brown-outs and queues every
+# later request into its own timeout.
+PROXY_PASSTHROUGH_TIMEOUT_SECONDS = float(
+    os.environ.get("PROXY_PASSTHROUGH_TIMEOUT_SECONDS", "60")
+)
 
 # SiliconFlow release-notes sync: periodically decommission models that the
 # upstream has officially retired, so the pool doesn't keep dead entries that
