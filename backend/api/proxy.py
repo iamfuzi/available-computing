@@ -64,6 +64,8 @@ from config import (
     PROXY_MODEL_CONCURRENCY_LIMIT,
     PROXY_EMBEDDING_CONCURRENCY_LIMIT,
     PROXY_SLOT_QUEUE_TIMEOUT_SECONDS,
+    PROXY_DEFAULT_MODEL_RPM,
+    PROXY_PROVIDER_RPM,
 )
 
 router = APIRouter()
@@ -339,12 +341,38 @@ def _passive_call_count(session: Session, model_id: str, since: datetime) -> int
     ).all())
 
 
+def _passive_channel_call_count(session: Session, channel_id: str, since: datetime) -> int:
+    """Passive proxied calls across ALL models of one channel in the window.
+
+    Models on the same provider share one upstream API key, whose real RPM
+    cap applies to their combined volume — per-model counting cannot see it.
+    """
+    return len(session.exec(
+        select(HealthRecord)
+        .join(Model, HealthRecord.model_id == Model.id)
+        .where(Model.channel_id == channel_id)
+        .where(HealthRecord.is_passive == True)
+        .where(HealthRecord.checked_at >= since)
+    ).all())
+
+
 def _check_model_budget(model: Model, session: Session) -> None:
-    """Skip a model before calling upstream when local request budget is full."""
+    """Skip a model before calling upstream when local request budget is full.
+
+    Three layers:
+    1. per-model RPM from observed rate-limit headers (or the manual
+       whitelist), with PROXY_DEFAULT_MODEL_RPM as a floor for providers
+       that never send rate-limit headers (zhipu/xfyun) — without the floor
+       the local budget silently never engages and bursts eat live 429s;
+    2. per-model RPD (observed/whitelisted only);
+    3. per-provider RPM over all models of the channel (PROXY_PROVIDER_RPM).
+    """
     limits = _parse_rate_limit_json(model)
     now = _now_utc()
     rpm = limits.get("rpm")
-    if isinstance(rpm, int) and rpm > 0:
+    if not (isinstance(rpm, int) and rpm > 0):
+        rpm = PROXY_DEFAULT_MODEL_RPM if PROXY_DEFAULT_MODEL_RPM > 0 else None
+    if rpm:
         since = now - timedelta(seconds=60)
         if _passive_call_count(session, model.id, since) >= rpm:
             raise ModelBudgetExceeded(60, "local_rpm_exceeded")
@@ -355,6 +383,11 @@ def _check_model_budget(model: Model, session: Session) -> None:
         if _passive_call_count(session, model.id, day_start) >= rpd:
             tomorrow = day_start + timedelta(days=1)
             raise ModelBudgetExceeded(max(1, int((tomorrow - now).total_seconds())), "local_rpd_exceeded")
+
+    if PROXY_PROVIDER_RPM > 0:
+        since = now - timedelta(seconds=60)
+        if _passive_channel_call_count(session, model.channel_id, since) >= PROXY_PROVIDER_RPM:
+            raise ModelBudgetExceeded(60, "local_provider_rpm_exceeded")
 
 
 def _upstream_headers(adapter, key: str) -> dict[str, str]:

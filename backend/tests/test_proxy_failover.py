@@ -263,3 +263,80 @@ class TestKeyUsage:
         totals = {t["api_key_id"]: t for t in resp.json()["totals"]}
         assert totals["key-1"]["success"] == 4
         usage._counters.clear()
+
+
+# ── RPM 防护：默认模型限额 + 供应商聚合限额 ──────────────────────────────
+
+
+class TestRPMThrottle:
+    def _seed_passive(self, db_session, model, count=2):
+        from models import HealthRecord
+
+        for _ in range(count):
+            db_session.add(
+                HealthRecord(
+                    model_id=model.id,
+                    status="ok",
+                    is_passive=True,
+                    response_ms=100,
+                )
+            )
+        db_session.commit()
+
+    def test_default_model_rpm_floor_for_headerless_providers(
+        self, db_session, sample_model, monkeypatch
+    ):
+        """无 rate-limit 头的供应商（智谱/讯飞）也能吃到默认 RPM 兜底。"""
+        import api.proxy as proxy
+
+        monkeypatch.setattr(proxy, "PROXY_DEFAULT_MODEL_RPM", 2)
+        assert not sample_model.rate_limit
+        self._seed_passive(db_session, sample_model, count=2)
+
+        with pytest.raises(proxy.ModelBudgetExceeded) as exc:
+            proxy._check_model_budget(sample_model, db_session)
+        assert exc.value.reason == "local_rpm_exceeded"
+
+    def test_observed_rpm_still_takes_priority(
+        self, db_session, sample_model, sample_channel, monkeypatch
+    ):
+        """模型自带 observed rpm 时不被默认值覆盖（这里 observed 更宽松）。"""
+        import json as _json
+
+        import api.proxy as proxy
+
+        monkeypatch.setattr(proxy, "PROXY_DEFAULT_MODEL_RPM", 1)
+        sample_model.rate_limit = _json.dumps({"rpm": 10})
+        db_session.add(sample_model)
+        db_session.commit()
+        self._seed_passive(db_session, sample_model, count=2)
+
+        proxy._check_model_budget(sample_model, db_session)  # 不应抛出
+
+    def test_provider_rpm_aggregates_all_models_on_channel(
+        self, db_session, sample_model, sample_channel, monkeypatch
+    ):
+        """同一 channel 的模型共享供应商 RPM 窗口。"""
+        import api.proxy as proxy
+
+        monkeypatch.setattr(proxy, "PROXY_PROVIDER_RPM", 2)
+        other = Model(
+            id="mdl-sibling",
+            channel_id=sample_channel.id,
+            model_id="sibling-model",
+            display_name="sibling",
+            category="text",
+            is_free=True,
+            is_active=True,
+            health_status="healthy",
+            last_response_ms=100,
+        )
+        db_session.add(other)
+        db_session.commit()
+
+        # 配额全部消耗在 sibling 上，本模型自身 0 次也应被拦
+        self._seed_passive(db_session, other, count=2)
+
+        with pytest.raises(proxy.ModelBudgetExceeded) as exc:
+            proxy._check_model_budget(sample_model, db_session)
+        assert exc.value.reason == "local_provider_rpm_exceeded"

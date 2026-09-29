@@ -92,6 +92,16 @@ PROXY_EMBEDDING_CONCURRENCY_LIMIT = int(
 PROXY_SLOT_QUEUE_TIMEOUT_SECONDS = float(
     os.environ.get("PROXY_SLOT_QUEUE_TIMEOUT_SECONDS", "15")
 )
+# Free-tier models almost always carry per-key RPM caps, but several free
+# providers (zhipu, xfyun) never send rate-limit headers, so the observed
+# per-model budget never engages and bursts eat live 429s. These two floors
+# close that gap BEFORE the request leaves:
+#   PROXY_DEFAULT_MODEL_RPM — fallback per-model RPM when no observed/manual
+#     rpm exists on the model. 0 = off.
+#   PROXY_PROVIDER_RPM — sliding-window cap shared by ALL models of one
+#     channel (they share the upstream API key's real limit). 0 = off.
+PROXY_DEFAULT_MODEL_RPM = int(os.environ.get("PROXY_DEFAULT_MODEL_RPM", "0"))
+PROXY_PROVIDER_RPM = int(os.environ.get("PROXY_PROVIDER_RPM", "0"))
 
 # SiliconFlow release-notes sync: periodically decommission models that the
 # upstream has officially retired, so the pool doesn't keep dead entries that
