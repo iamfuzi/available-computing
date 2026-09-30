@@ -1809,3 +1809,28 @@ class TestEmptyContentFeedback:
         with _S(engine) as s:
             rec = s.exec(_sel(HealthRecord).order_by(HealthRecord.id.desc())).first()
         assert rec.error_code == "empty_content"
+
+    @pytest.mark.asyncio
+    async def test_auto_text_endpoint_skips_inline_thinking_model(self, app_client, auth_headers, db_session, sample_model, sample_channel):
+        # 端到端：auto:text 不得选中 z1（此前 kind=text 分支漏了泛文本过滤）
+        from models import Model
+        db_session.add(Model(
+            id="mdl-z1e", channel_id=sample_channel.id, model_id="glm-z1-flash",
+            is_free=True, is_active=True, health_status="healthy", category="text",
+            last_response_ms=10,
+        ))
+        db_session.commit()
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"id": "c1", "choices": [{"message": {"content": "ok"}}], "model": "x"}
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_cm.post = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = mock_cm
+            resp = await app_client.post("/v1/chat/completions", headers=auth_headers, json={
+                "model": "auto:text", "messages": [{"role": "user", "content": "hi"}],
+            })
+        assert resp.status_code == 200
+        assert resp.headers.get("X-AC-Selected-Model") != "glm-z1-flash"

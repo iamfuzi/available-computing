@@ -224,11 +224,18 @@ def auto_candidate_models(
         candidates.sort(key=lambda m: scoring.route_score_key(m, session))
         return candidates
     candidates = [m for m in chat if (m.category or "text") == kind]
-    if kind == "text" and not candidates:
-        # auto:text 与 smart/fast 一致：无存活的纯文本类候选时回退到
-        # 聊天池。vision 类 flash 模型完全能服务文本补全（显式指定
-        # model id 一直可用即是证明），不应因类别标记被排除。
-        candidates = generic_candidates
+    if kind == "text":
+        # Same contract as smart/fast: auto:text promises a directly usable
+        # answer, so inline-thinking models (z1's <think> body) drop out —
+        # unless literally nothing else exists, in which case the fallback
+        # below still yields a routable pool.
+        filtered = [m for m in candidates if scoring.is_generic_text_candidate(m)]
+        candidates = filtered or candidates
+        if not candidates:
+            # auto:text 与 smart/fast 一致：无存活的纯文本类候选时回退到
+            # 聊天池。vision 类 flash 模型完全能服务文本补全（显式指定
+            # model id 一直可用即是证明），不应因类别标记被排除。
+            candidates = generic_candidates
     candidates.sort(key=lambda m: scoring.route_score_key(m, session))
     return candidates
 
