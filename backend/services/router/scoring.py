@@ -92,8 +92,26 @@ def looks_like_vision_model(model_id: str) -> bool:
     )
 
 
+# Models that stream their reasoning INLINE in content (z1 answers start
+# with "<think>..."). Every auto:text consumer would have to strip the think
+# block to get a clean answer, and long tasks burn the caller's output cap on
+# thinking and return an empty body (hotspot-pipeline, 2026-09-30). Models
+# with a separate reasoning/reasoning_content field do NOT belong here —
+# their content contract is clean.
+_INLINE_THINKING_MARKERS = ("z1", "thinking")
+
+
+def looks_like_inline_thinking_model(model_id: str) -> bool:
+    lower = model_id.lower()
+    return any(marker in lower for marker in _INLINE_THINKING_MARKERS)
+
+
 def is_generic_text_candidate(model: Model) -> bool:
-    return (model.category or "text") == "text" and not looks_like_vision_model(model.model_id)
+    if (model.category or "text") != "text" or looks_like_vision_model(model.model_id):
+        return False
+    # auto:text/fast/smart promise a directly usable answer; inline-thinking
+    # models break that contract. They stay callable by explicit model name.
+    return not looks_like_inline_thinking_model(model.model_id)
 
 
 def is_pool_eligible(model: Model, session: Session) -> bool:

@@ -1307,20 +1307,42 @@ async def chat_completions(
                     upstream_attempts_made,
                 )
                 continue
-            await record_passive_health(model.id, ms, None, channel.id, key)
-            clear_billing_failures(model.id, session)
-            clear_rate_limit(model.id, session)
+            # A 200 whose content is empty is a routing-level failure in
+            # disguise: reasoning-style models burn the caller's output cap on
+            # thinking and return no answer (z1 + max_tokens=1024, hotspot
+            # pipeline 2026-09-30). Record it as a passive failure so the
+            # model demotes and auto routes drift away; the response itself
+            # is still forwarded verbatim to the caller.
+            _choice = (response_payload.get("choices") or [{}])[0]
+            _message = _choice.get("message") or {}
+            _content = _message.get("content")
+            _content_text = _content if isinstance(_content, str) else ""
+            _has_reasoning = bool(
+                (_message.get("reasoning_content") or _message.get("reasoning") or "").strip()
+            )
+            _empty_body = (
+                not _content_text.strip()
+                and (_has_reasoning or _choice.get("finish_reason") == "length")
+            )
+            await record_passive_health(
+                model.id, ms, "empty_content" if _empty_body else None, channel.id, key
+            )
+            if not _empty_body:
+                clear_billing_failures(model.id, session)
+                clear_rate_limit(model.id, session)
             _usage = (response_payload.get("usage") or {}).get("total_tokens")
             _record_provider_tokens(channel.id, _usage if isinstance(_usage, int) else 0)
             logger.info(
                 "upstream ok request_id=%s provider=%s model=%s status=200 ms=%s attempt=%d",
                 request_id, channel.provider_type, model.model_id, ms, upstream_attempts_made,
             )
-            record_usage(_usage_key_id, "chat", "success")
+            record_usage(_usage_key_id, "chat", "fail" if _empty_body else "success")
             _log_proxy_request(
                 category="chat", request_id=request_id, api_key_id=_usage_key_id,
                 requested_model=original_model, selected_model=model.model_id,
-                provider=channel.provider_type, outcome="success", status_code=200,
+                provider=channel.provider_type,
+                outcome="fail" if _empty_body else "success", status_code=200,
+                error_code="empty_content" if _empty_body else None,
                 latency_ms=ms, attempted=attempted,
             )
             return JSONResponse(

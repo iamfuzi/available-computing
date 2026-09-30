@@ -1737,3 +1737,75 @@ class TestRequestLog:
     def test_log_helper_never_raises(self):
         from api.proxy import _log_proxy_request
         _log_proxy_request(category=None, request_id=None, requested_model=None, outcome="success")
+
+
+class TestInlineThinkingExclusion:
+    """auto:text promises a directly usable answer. z1-style models stream
+    their reasoning inline in content ("<think>...") — every consumer would
+    have to strip it, and long tasks exhaust the caller's output cap on
+    thinking and return an empty body (hotspot-pipeline, 2026-09-30). They
+    stay out of generic auto routes but remain callable by name."""
+
+    @pytest.mark.parametrize(
+        ("model_id", "excluded"),
+        [
+            ("glm-z1-flash", True),
+            ("glm-z1-flashx", True),
+            ("deepseek/deepseek-r1:free", False),      # reasoning 走独立字段
+            ("openai/gpt-oss-20b", False),
+            ("glm-4.7-flash", False),
+            ("glm-4.5-flash", False),
+        ],
+    )
+    def test_marker(self, model_id, excluded):
+        from services.router.scoring import looks_like_inline_thinking_model
+        assert looks_like_inline_thinking_model(model_id) is excluded
+
+    def test_z1_not_in_generic_text_candidates(self, db_session, sample_channel):
+        # 基础 chat 池保留 z1（指定名可调用）；泛文本候选（auto 路由层）排除它
+        from models import Model
+        from services.router.candidates import chat_candidates
+        from services.router.scoring import is_generic_text_candidate
+        m = Model(
+            id="mdl-z1", channel_id=sample_channel.id, model_id="glm-z1-flash",
+            is_free=True, is_active=True, health_status="healthy", category="text",
+        )
+        db_session.add(m)
+        db_session.commit()
+        assert m in chat_candidates(db_session)          # 指定名调用不受影响
+        assert not is_generic_text_candidate(m)          # auto:* 路由排除
+
+
+class TestEmptyContentFeedback:
+    @pytest.mark.asyncio
+    async def test_empty_content_200_demotes_model(self, app_client, auth_headers, db_session, sample_model, sample_channel):
+        # 200 + content 空 + reasoning 有值 → 记 passive 失败（empty_content），
+        # 模型降级；响应仍原样转发
+        from database import engine
+        from sqlmodel import Session as _S
+        from models import HealthRecord
+        from sqlmodel import select as _sel
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {
+                "id": "c1",
+                "choices": [{"message": {"content": "", "reasoning_content": "thinking..."},
+                             "finish_reason": "length"}],
+            }
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_cm.post = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = mock_cm
+            resp = await app_client.post("/v1/chat/completions", headers=auth_headers, json={
+                "model": "test-model-free", "messages": [{"role": "user", "content": "hi"}],
+            })
+            assert resp.status_code == 200  # 透明转发
+            assert resp.json()["choices"][0]["message"]["content"] == ""
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 1
+        assert sample_model.health_status == "slow"
+        with _S(engine) as s:
+            rec = s.exec(_sel(HealthRecord).order_by(HealthRecord.id.desc())).first()
+        assert rec.error_code == "empty_content"
