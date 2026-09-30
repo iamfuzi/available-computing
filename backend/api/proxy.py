@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal, Optional
 
-from database import get_session
+from database import get_session, engine
 from models import Model, Channel, HealthRecord, ApiKey
 from api.auth import verify_token_or_apikey
 from services.health import (
@@ -477,19 +477,50 @@ async def _proxy_stream(
     key: str,
     slot_key: str | None = None,
 ):
-    """Forward SSE chunks and record health when done."""
+    """Forward SSE chunks and record health when done.
+
+    Rate limits that fire *after* the 200/headers were sent come back as SSE
+    events (``{"error": {...}}`` or ``finish_reason: "error"``), never as an
+    HTTP 429 — OpenRouter documents this for its free tier. Detecting them
+    here keeps the failure out of the success-based health stats and applies
+    the normal rate-limit cooldown.
+    """
     start = time.monotonic()
     error_code = None
+    rate_limited_mid_stream = False
     try:
         async for line in response.aiter_lines():
             yield line + "\n\n"
+            if line.startswith("data:") and '"error"' in line:
+                try:
+                    chunk = json.loads(line[5:].strip())
+                except ValueError:
+                    chunk = None
+                if isinstance(chunk, dict):
+                    err = chunk.get("error")
+                    finish_reason = None
+                    choices = chunk.get("choices") or []
+                    if choices and isinstance(choices[0], dict):
+                        finish_reason = choices[0].get("finish_reason")
+                    if err:
+                        code = err.get("code") if isinstance(err, dict) else None
+                        if code == 429:
+                            rate_limited_mid_stream = True
+                        else:
+                            error_code = "upstream_error"
+                    elif finish_reason == "error":
+                        error_code = "upstream_error"
             if line.startswith("data: [DONE]"):
                 break
     except Exception:
         error_code = "network_error"
     finally:
         ms = int((time.monotonic() - start) * 1000)
-        await record_passive_health(model_id, ms, error_code, channel_id, key)
+        if rate_limited_mid_stream:
+            with Session(engine) as session:
+                record_rate_limit(model_id, None, session, response_ms=ms)
+        else:
+            await record_passive_health(model_id, ms, error_code, channel_id, key)
         await client.aclose()
         _release_model_slot(slot_key)
 

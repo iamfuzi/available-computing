@@ -52,6 +52,20 @@ def parse_rate_limit_headers(response: Response) -> Optional[dict]:
         except (ValueError, IndexError):
             pass
 
+    # OpenRouter platform quota responses use bare X-RateLimit-Limit / -Reset.
+    # Stored under their own keys — the window is provider-specific and must
+    # not be conflated with rpm/rpd.
+    if "x-ratelimit-limit" in headers:
+        try:
+            limits["x-ratelimit-limit"] = int(headers["x-ratelimit-limit"])
+        except ValueError:
+            pass
+    if "x-ratelimit-reset" in headers:
+        try:
+            limits["x-ratelimit-reset"] = int(headers["x-ratelimit-reset"])
+        except ValueError:
+            pass
+
     return limits if limits else None
 
 
@@ -64,7 +78,9 @@ def parse_remaining_headers(response: Response) -> Optional[dict]:
         ("x-ratelimit-remaining-requests", "rpm_remaining"),
         ("x-ratelimit-remaining-tokens", "tpm_remaining"),
         ("x-ratelimit-remaining-rpd", "rpd_remaining"),
-        ("x-ratelimit-remaining", "rpm_remaining"),
+        # Bare variant (OpenRouter): day-scoped remaining, own key so it is
+        # not misread as a per-minute figure.
+        ("x-ratelimit-remaining", "x-ratelimit-remaining"),
     ]:
         if key in headers:
             try:

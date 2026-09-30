@@ -1569,3 +1569,94 @@ class TestNonChatModels:
         )
         assert resp.status_code == 200
         assert any(m["id"] == "BAAI/bge-m3" for m in resp.json()["data"])
+
+
+class TestProxyStreamErrorEvents:
+    """Rate limits that fire after the SSE 200/headers were sent arrive as
+    in-stream events ({"error": {...}} / finish_reason:"error"), never as an
+    HTTP 429. The proxy must route them into health tracking instead of
+    recording a success."""
+
+    @staticmethod
+    def _run_stream(lines, model, channel_id="ch-001", key="sk-test"):
+        """Consume _proxy_stream over a fake SSE response; returns the mock client."""
+        from api.proxy import _proxy_stream
+
+        async def _aiter():
+            for line in lines:
+                yield line
+
+        response = MagicMock()
+        response.aiter_lines = _aiter
+        client = MagicMock()
+        client.aclose = AsyncMock()
+        return _proxy_stream(response, client, model.id, channel_id, key), client
+
+    @pytest.mark.asyncio
+    async def test_midstream_429_sets_rate_limit_cooldown(self, db_session, sample_model, sample_channel):
+        gen, client = self._run_stream([
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"he"}}]}',
+            'data: {"error":{"code":429,"message":"Rate limit exceeded"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}',
+        ], sample_model)
+        async for _ in gen:
+            pass
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "rate_limited"
+        assert sample_model.rate_limited_until is not None
+        from sqlmodel import select
+        from models import HealthRecord
+        record = db_session.exec(select(HealthRecord)).one()
+        assert record.status == "rate_limited"
+        client.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_midstream_generic_error_counts_as_failure(self, db_session, sample_model, sample_channel):
+        gen, _ = self._run_stream([
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"he"}}]}',
+            'data: {"error":{"code":502,"message":"Provider error"}}',
+        ], sample_model)
+        async for _ in gen:
+            pass
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 1
+        assert sample_model.health_status == "slow"
+        from sqlmodel import select
+        from models import HealthRecord
+        record = db_session.exec(select(HealthRecord)).one()
+        assert record.error_code == "upstream_error"
+
+    @pytest.mark.asyncio
+    async def test_finish_reason_error_without_error_object(self, db_session, sample_model, sample_channel):
+        gen, _ = self._run_stream([
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"he"},"finish_reason":"error"}]}',
+        ], sample_model)
+        async for _ in gen:
+            pass
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 1
+
+    @pytest.mark.asyncio
+    async def test_clean_stream_still_records_success(self, db_session, sample_model, sample_channel):
+        gen, _ = self._run_stream([
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"hello"}}]}',
+            'data: [DONE]',
+        ], sample_model)
+        async for _ in gen:
+            pass
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 0
+        assert sample_model.health_status in ("healthy", "slow")
+
+    @pytest.mark.asyncio
+    async def test_error_word_inside_content_is_not_an_error_event(self, db_session, sample_model, sample_channel):
+        # A chunk whose *content* contains the quoted word "error" must not be
+        # misread as an error event — the parser requires an error object or
+        # finish_reason:"error", not just the substring.
+        gen, _ = self._run_stream([
+            'data: {"id":"c1","choices":[{"index":0,"delta":{"content":"the \\"error\\" word"}}]}',
+            'data: [DONE]',
+        ], sample_model)
+        async for _ in gen:
+            pass
+        db_session.refresh(sample_model)
+        assert sample_model.consecutive_errors == 0

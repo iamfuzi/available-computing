@@ -232,3 +232,115 @@ class TestHealthCheck:
         assert kwargs["headers"]["Authorization"] == "Bearer sk-test"
         assert "HTTP-Referer" in kwargs["headers"]
         assert kwargs["json"]["model"] == "m"
+
+    @pytest.mark.asyncio
+    async def test_probe_max_tokens_leaves_room_for_reasoning(self, adapter):
+        # Reasoning-style :free models spend small budgets entirely on the
+        # reasoning field and return empty content — with max_tokens=20 every
+        # such model was misclassified "empty_response"/down.
+        resp = httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        cm = _mock_client_returning(resp)
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=cm):
+            await adapter.health_check("m", "sk-test", _BASE)
+        _, kwargs = cm.post.call_args
+        assert kwargs["json"]["max_tokens"] >= 200
+
+    @pytest.mark.asyncio
+    async def test_200_reasoning_only_is_alive(self, adapter):
+        # Empty content but non-empty reasoning: the model answered, just
+        # inside the reasoning field. Must NOT be classified empty_response.
+        resp = httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "", "reasoning": "thinking..."}}]},
+        )
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.status in ("healthy", "slow")
+        assert info.error_code is None
+
+    @pytest.mark.asyncio
+    async def test_200_content_and_reasoning_both_empty_is_down(self, adapter):
+        resp = httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "", "reasoning": ""}}]},
+        )
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.status == "down"
+        assert info.error_code == "empty_response"
+
+
+# ── 429 source attribution ────────────────────────────────────────────────
+
+
+class TestRateLimitAttribution:
+    """OpenRouter 429s have two sources with different remedies: our own
+    platform quota (needs cooldown + less probing) vs upstream provider
+    overload (provider_code in the metadata; unrelated to our quota)."""
+
+    @pytest.mark.asyncio
+    async def test_429_platform_quota_is_rate_limited(self, adapter):
+        resp = httpx.Response(429, json={
+            "error": {"message": "Rate limit exceeded",
+                      "metadata": {"error_type": "rate_limit_exceeded"}},
+        })
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.error_code == "rate_limited"
+
+    @pytest.mark.asyncio
+    async def test_429_upstream_provider_is_upstream_rate_limited(self, adapter):
+        resp = httpx.Response(429, json={
+            "error": {"message": "Provider rate-limited",
+                      "metadata": {"provider_code": 429}},
+        })
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.status == "slow"
+        assert info.error_code == "upstream_rate_limited"
+
+    @pytest.mark.asyncio
+    async def test_429_without_metadata_defaults_to_platform(self, adapter):
+        resp = httpx.Response(429, json={"error": "rate limited"})
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.error_code == "rate_limited"
+
+
+# ── 401/403 model-level access restrictions ───────────────────────────────
+
+
+class TestAccessRestricted:
+    """Region locks, agentic-harness gates and data-policy filters return
+    401/403 for specific models while the key stays valid. They must be
+    separated from auth_failed so the channel is not declared key_invalid."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("message", [
+        "This model is not available in your region.",
+        "thinkingmachines/inkling:free is only available on agentic harnesses. Try plugging it into a coding agent",
+        "No endpoints found matching your data policy",
+        "No allowed providers are available",
+    ])
+    async def test_restriction_markers_are_access_restricted(self, adapter, message):
+        resp = httpx.Response(403, json={"error": {"message": message, "code": 403}})
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.status == "down"
+        assert info.error_code == "access_restricted"
+
+    @pytest.mark.asyncio
+    async def test_generic_401_is_still_auth_failed(self, adapter):
+        resp = httpx.Response(401, json={"error": {"message": "No auth credentials found"}})
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.status == "down"
+        assert info.error_code == "auth_failed"
+
+    @pytest.mark.asyncio
+    async def test_unparseable_error_body_is_auth_failed(self, adapter):
+        resp = httpx.Response(401, text="<html>gateway noise</html>",
+                              headers={"content-type": "text/html"})
+        with patch("adapters.openrouter.httpx.AsyncClient", return_value=_mock_client_returning(resp)):
+            info = await adapter.health_check("m", "sk-test", _BASE)
+        assert info.error_code == "auth_failed"

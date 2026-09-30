@@ -7,6 +7,33 @@ from services.rate_limit import parse_rate_limit_headers, parse_remaining_header
 
 _BASE = "https://openrouter.ai/api/v1"
 
+# Reasoning-style :free models routinely spend all tokens of a small probe on
+# the ``reasoning`` field and return an empty ``content``. 20 tokens made every
+# such model look dead ("empty_response"); 200 is enough for reasoning + a
+# short answer on the models observed in production.
+PROBE_MAX_TOKENS = 200
+
+# 401/403 error-body fragments that describe a *model-level* access policy
+# (region lock, client-type gate, data-policy filter) rather than a dead key.
+# The key itself is fine — these must not flip the channel to key_invalid.
+_ACCESS_RESTRICTED_MARKERS = (
+    "not available in your region",
+    "only available on agentic harnesses",
+    "matching your data policy",
+    "no allowed providers",
+)
+
+
+def _error_message(response: httpx.Response) -> str:
+    """Best-effort lowercase error.message from an error response body."""
+    try:
+        err = response.json().get("error")
+    except ValueError:
+        return ""
+    if isinstance(err, dict):
+        return str(err.get("message") or "").lower()
+    return str(err or "").lower()
+
 
 def _infer_category(model: dict) -> str:
     arch = model.get("architecture", {})
@@ -83,7 +110,7 @@ class OpenRouterAdapter(ProviderAdapter):
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "你是什么模型"}],
-            "max_tokens": 20,
+            "max_tokens": PROBE_MAX_TOKENS,
         }
         start = time.monotonic()
         try:
@@ -109,10 +136,14 @@ class OpenRouterAdapter(ProviderAdapter):
 
         if r.status_code == 200:
             try:
-                content = r.json()["choices"][0]["message"]["content"]
-                if not content or not content.strip():
+                message = r.json()["choices"][0]["message"]
+                content = (message.get("content") or "").strip()
+                reasoning = (message.get("reasoning") or "").strip()
+                # Reasoning models with a truncated budget answer only in the
+                # reasoning field; that is still proof the model is serving.
+                if not content and not reasoning:
                     return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
-            except (KeyError, IndexError, TypeError):
+            except (KeyError, IndexError, TypeError, ValueError):
                 return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(
@@ -121,13 +152,30 @@ class OpenRouterAdapter(ProviderAdapter):
                 observed_remaining=parse_remaining_headers(r),
             )
         if r.status_code == 429:
-            # 429 means the model is online but currently rate-limited — it's not
-            # down. Mark it slow so it stays in the pool at lower priority rather
-            # than being excluded entirely.
-            return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited",
+            # Two distinct sources with different remedies: our own platform
+            # quota (error.metadata.error_type == "rate_limit_exceeded") needs
+            # a cooldown and less probing; upstream provider overload (a
+            # provider_code in the metadata) is unrelated to our quota and
+            # only deprioritizes the model.
+            metadata: dict = {}
+            try:
+                err = r.json().get("error")
+                if isinstance(err, dict):
+                    metadata = err.get("metadata") or {}
+            except ValueError:
+                pass
+            error_code = "upstream_rate_limited" if metadata.get("provider_code") else "rate_limited"
+            return HealthInfo(status="slow", response_ms=response_ms, error_code=error_code,
                               observed_rate_limit=parse_rate_limit_headers(r),
                               observed_remaining=parse_remaining_headers(r))
         if r.status_code in (401, 403):
+            # Region locks / client-type gates / data-policy filters are model
+            # access restrictions — the credential still works for other
+            # models. Only a genuine auth rejection stays auth_failed (the
+            # service layer then re-verifies via validate_key before blaming
+            # the channel key).
+            if any(marker in _error_message(r) for marker in _ACCESS_RESTRICTED_MARKERS):
+                return HealthInfo(status="down", response_ms=response_ms, error_code="access_restricted")
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
         if r.status_code == 404:
             return HealthInfo(status="down", response_ms=response_ms, error_code="not_found")

@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 logger = logging.getLogger(__name__)
 
 from database import engine
-from models import Channel, Model, HealthRecord
+from models import Channel, Model, HealthRecord, Setting
 from adapters import get_adapter
 from config import (
     PROBE_INTERVAL_BETWEEN_MODELS_SEC,
@@ -20,6 +20,16 @@ from config import (
     PASSIVE_ERROR_DOWN_THRESHOLD,
     SLOW_RESPONSE_THRESHOLD_MS,
 )
+
+# HTTP status persisted on probe HealthRecords per adapter error code, so the
+# admin views show what the upstream actually returned instead of a guess.
+_PROBE_HTTP_STATUS = {
+    "auth_failed": 401,
+    "access_restricted": 403,
+    "rate_limited": 429,
+    "upstream_rate_limited": 429,
+    "not_found": 404,
+}
 
 
 def _set_channel_status(
@@ -342,7 +352,10 @@ async def active_probe(
             error_code=health.error_code,
             is_passive=False,
             verification_method=verification_method,
-            http_status=200 if health.error_code is None else (401 if health.error_code == "auth_failed" else None),
+            http_status=(
+                200 if health.error_code is None
+                else _PROBE_HTTP_STATUS.get(health.error_code)
+            ),
             check_run_id=check_run_id,
             failure_reason=health.error_code,
             rate_limit_snapshot=json.dumps(health.observed_rate_limit) if health.observed_rate_limit else None,
@@ -391,7 +404,18 @@ async def active_probe(
         if health.error_code is None and health.status in ("healthy", "slow"):
             _set_channel_status(session, model.channel_id, "active")
         elif health.error_code == "auth_failed" and adapter.requires_api_key:
-            _set_channel_status(session, model.channel_id, "key_invalid", "active_probe_auth_failed")
+            # A single model's 401/403 is not proof the key died — region
+            # locks, retired free variants and harness-only gates all produce
+            # auth-shaped errors while the credential stays valid. Confirm
+            # against a key-level endpoint before blaming the channel, so a
+            # false "key invalid" alert can't take a healthy channel offline.
+            key_alive = True
+            try:
+                await adapter.validate_key(decrypted_key, base_url)
+            except Exception:
+                key_alive = False
+            if not key_alive:
+                _set_channel_status(session, model.channel_id, "key_invalid", "active_probe_auth_failed")
 
         session.commit()
     from services.notifications import broadcast_notifications_updated
@@ -436,14 +460,34 @@ def _channel_heartbeat_budget(models: list[Model]) -> int:
     return min(ratio_budget, reserve_cap)
 
 
-def _heartbeat_count_today(session: Session, model_ids: list[str], now: datetime) -> int:
+def _probe_daily_budget_override(session: Session, channel_id: str) -> int | None:
+    """Hard per-day cap on ALL non-passive probes for one channel.
+
+    Setting ``probe_daily_budget:<channel_id>``. Needed for providers whose
+    free tier prices *every* model request against a tiny global daily quota
+    (OpenRouter free tier: 50 requests/day, failed attempts included) — the
+    RPD-derived heartbeat budget cannot express that, and uncapped rechecks
+    once burned most of the quota before real traffic got any.
+    """
+    row = session.get(Setting, f"probe_daily_budget:{channel_id}")
+    if not row:
+        return None
+    try:
+        value = int(row.value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _active_probe_count_today(session: Session, model_ids: list[str], now: datetime) -> int:
+    """Non-passive probe records today: heartbeat + baseline + down-recheck."""
     if not model_ids:
         return 0
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return len(session.exec(
         select(HealthRecord)
         .where(HealthRecord.model_id.in_(model_ids))
-        .where(HealthRecord.verification_method == "active_heartbeat")
+        .where(HealthRecord.is_passive == False)  # noqa: E712
         .where(HealthRecord.checked_at >= day_start)
     ).all())
 
@@ -481,9 +525,15 @@ async def probe_all_stale_models(get_key_fn=None):
         by_channel: dict[str, list[tuple[Model, str]]] = {}
         for channel_id, all_models in by_channel_models.items():
             budget = _channel_heartbeat_budget(all_models)
+            override = _probe_daily_budget_override(session, channel_id)
+            if override is not None:
+                # The override is a ceiling across every probe path; when the
+                # RPD-derived budget is 0 (no metadata) it also *enables*
+                # heartbeat probing that would otherwise be skipped entirely.
+                budget = override if budget <= 0 else min(budget, override)
             if budget <= 0:
                 continue
-            used = _heartbeat_count_today(session, [m.id for m in all_models], now)
+            used = _active_probe_count_today(session, [m.id for m in all_models], now)
             remaining = max(0, budget - used)
             if remaining <= 0:
                 continue
@@ -544,6 +594,18 @@ async def probe_channel_models(
             stmt = stmt.where(Model.last_verified_at == None)
         models = session.exec(stmt).all()
 
+        # Scheduled discovery baselines share the same daily quota as every
+        # other probe. verification_method == "manual" is an explicit admin
+        # action and deliberately bypasses the cap.
+        if verification_method != "manual":
+            override = _probe_daily_budget_override(session, channel_id)
+            if override is not None:
+                now = datetime.now(timezone.utc)
+                remaining = max(
+                    0, override - _active_probe_count_today(session, [m.id for m in models], now)
+                )
+                models = models[:remaining]
+
         from services.crypto import decrypt as _decrypt
         from api.channels import _get_salt
         from config import get_admin_password
@@ -588,6 +650,7 @@ async def reprobe_down_models() -> int:
         from config import get_admin_password
 
         salt = _get_salt(session)
+        now = datetime.now(timezone.utc)
         by_channel: dict[str, list[tuple[Model, str]]] = {}
         for m in rows:
             ch = channels.get(m.channel_id)
@@ -599,6 +662,26 @@ async def reprobe_down_models() -> int:
                 logger.exception("Decrypt channel key failed for down-recheck")
                 continue
             by_channel.setdefault(m.channel_id, []).append((m, key))
+
+        # Respect the per-channel daily probe cap: down-recheck runs four times
+        # a day and used to re-probe every down model each run, which alone
+        # could consume a small global quota (OpenRouter free tier) before
+        # real traffic saw any of it.
+        for channel_id in list(by_channel):
+            override = _probe_daily_budget_override(session, channel_id)
+            if override is None:
+                continue
+            ids = [m.id for m, _ in by_channel[channel_id]]
+            remaining = max(0, override - _active_probe_count_today(session, ids, now))
+            if remaining == 0:
+                del by_channel[channel_id]
+                continue
+            # Oldest-checked first so the cap rotates through the backlog
+            # across runs instead of always re-checking the same head.
+            by_channel[channel_id].sort(
+                key=lambda item: item[0].last_checked_at or datetime.min.replace(tzinfo=timezone.utc)
+            )
+            by_channel[channel_id] = by_channel[channel_id][:remaining]
 
     total = sum(len(items) for items in by_channel.values())
     if not total:

@@ -174,10 +174,13 @@ class TestActiveProbe:
     @pytest.mark.asyncio
     async def test_deterministic_failure_still_marked_down(self, db_session, sample_model, sample_channel):
         # Deterministic failures (auth/not_found/empty) stay down — only the
-        # transient ones were changed.
+        # transient ones were changed. validate_key is mocked as failing so
+        # the channel-flip path is exercised without network access.
         from services.health import active_probe
         with patch("adapters.openrouter.OpenRouterAdapter.health_check",
-                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=120, error_code="auth_failed"))):
+                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=120, error_code="auth_failed"))), \
+             patch("adapters.openrouter.OpenRouterAdapter.validate_key",
+                   new=AsyncMock(side_effect=ValueError("Invalid API key"))):
             await active_probe(sample_model, "sk-test")
         db_session.refresh(sample_model)
         assert sample_model.health_status == "down"
@@ -233,8 +236,12 @@ class TestActiveProbe:
     @pytest.mark.asyncio
     async def test_auth_probe_marks_channel_key_invalid(self, db_session, sample_model, sample_channel):
         from services.health import active_probe
+        # Since the key-invalid confirmation change, the channel only flips when
+        # the key-level validate_key also fails (mocked here).
         with patch("adapters.openrouter.OpenRouterAdapter.health_check",
-                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=30, error_code="auth_failed"))):
+                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=30, error_code="auth_failed"))), \
+             patch("adapters.openrouter.OpenRouterAdapter.validate_key",
+                   new=AsyncMock(side_effect=ValueError("Invalid API key"))):
             await active_probe(sample_model, "sk-test")
 
         db_session.refresh(sample_channel)
@@ -415,3 +422,188 @@ class TestEventRecheck:
         assert sample_model.is_free is None
         assert sample_model.free_type == "billing_suspect"
         assert sample_model.free_source == "event_recheck"
+
+
+class TestAuthFailedKeyConfirmation:
+    """A model-level 401/403 is not proof the channel key died — region locks
+    and retired free variants produce auth-shaped errors with a valid key.
+    Only a failing key-level validate_key may flip the channel to
+    key_invalid (and raise the critical notification)."""
+
+    @pytest.mark.asyncio
+    async def test_auth_failed_with_valid_key_keeps_channel_active(
+        self, db_session, sample_model, sample_channel
+    ):
+        from services.health import active_probe
+        with patch("adapters.openrouter.OpenRouterAdapter.health_check",
+                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=100, error_code="auth_failed"))), \
+             patch("adapters.openrouter.OpenRouterAdapter.validate_key",
+                   new=AsyncMock(return_value=None)):  # key-level check passes
+            await active_probe(sample_model, "sk-test")
+        db_session.refresh(sample_channel)
+        assert sample_channel.status == "active"
+
+    @pytest.mark.asyncio
+    async def test_auth_failed_with_failing_key_flips_channel(
+        self, db_session, sample_model, sample_channel
+    ):
+        from services.health import active_probe
+        with patch("adapters.openrouter.OpenRouterAdapter.health_check",
+                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=100, error_code="auth_failed"))), \
+             patch("adapters.openrouter.OpenRouterAdapter.validate_key",
+                   new=AsyncMock(side_effect=ValueError("Invalid API key"))):
+            await active_probe(sample_model, "sk-test")
+        db_session.refresh(sample_channel)
+        assert sample_channel.status == "key_invalid"
+        assert sample_channel.status_reason == "active_probe_auth_failed"
+
+    @pytest.mark.asyncio
+    async def test_access_restricted_never_flips_channel(
+        self, db_session, sample_model, sample_channel
+    ):
+        from services.health import active_probe
+        with patch("adapters.openrouter.OpenRouterAdapter.health_check",
+                   new=AsyncMock(return_value=HealthInfo(status="down", response_ms=100, error_code="access_restricted"))), \
+             patch("adapters.openrouter.OpenRouterAdapter.validate_key",
+                   new=AsyncMock(side_effect=AssertionError("must not be called"))):
+            await active_probe(sample_model, "sk-test")
+        db_session.refresh(sample_channel)
+        assert sample_channel.status == "active"
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "down"
+        record = db_session.exec(select(HealthRecord)).one()
+        assert record.failure_reason == "access_restricted"
+        assert record.http_status == 403
+
+    @pytest.mark.asyncio
+    async def test_upstream_rate_limited_probe_keeps_model_routable(
+        self, db_session, sample_model, sample_channel
+    ):
+        from services.health import active_probe
+        with patch("adapters.openrouter.OpenRouterAdapter.health_check",
+                   new=AsyncMock(return_value=HealthInfo(status="slow", response_ms=250, error_code="upstream_rate_limited"))):
+            await active_probe(sample_model, "sk-test")
+        db_session.refresh(sample_model)
+        # Upstream overload is not our quota: no cooldown, model stays routable.
+        assert sample_model.health_status == "slow"
+        assert sample_model.rate_limited_until is None
+        record = db_session.exec(select(HealthRecord)).one()
+        assert record.failure_reason == "upstream_rate_limited"
+        assert record.http_status == 429
+
+
+class TestProbeDailyBudget:
+    """Setting probe_daily_budget:<channel_id> caps ALL non-passive probes per
+    UTC day. Guards providers whose free tier bills every model request
+    against a tiny global daily quota (OpenRouter: 50/day, failures included)."""
+
+    def test_override_reading(self, db_session, sample_channel):
+        from models import Setting
+        from services.health import _probe_daily_budget_override
+        assert _probe_daily_budget_override(db_session, sample_channel.id) is None
+        db_session.add(Setting(key=f"probe_daily_budget:{sample_channel.id}", value="6"))
+        db_session.commit()
+        assert _probe_daily_budget_override(db_session, sample_channel.id) == 6
+
+    @pytest.mark.parametrize("value", ["0", "-3", "abc"])
+    def test_override_ignores_non_positive_or_malformed(self, db_session, sample_channel, value):
+        from models import Setting
+        from services.health import _probe_daily_budget_override
+        db_session.add(Setting(key=f"probe_daily_budget:{sample_channel.id}", value=value))
+        db_session.commit()
+        assert _probe_daily_budget_override(db_session, sample_channel.id) is None
+
+    def test_active_probe_count_excludes_passive(self, db_session, sample_model, sample_channel):
+        from services.health import _active_probe_count_today
+        now = datetime.now(timezone.utc)
+        for i in range(3):
+            db_session.add(HealthRecord(
+                model_id=sample_model.id, status="slow", response_ms=1,
+                is_passive=False, verification_method="active_recheck", checked_at=now,
+            ))
+        db_session.add(HealthRecord(
+            model_id=sample_model.id, status="healthy", response_ms=1,
+            is_passive=True, verification_method="passive", checked_at=now,
+        ))
+        db_session.commit()
+        assert _active_probe_count_today(db_session, [sample_model.id], now) == 3
+
+    @pytest.mark.asyncio
+    async def test_reprobe_down_respects_budget(self, db_session, sample_channel):
+        from models import Setting
+        from services.health import reprobe_down_models
+
+        for i in range(5):
+            db_session.add(Model(
+                id=f"mdl-d{i}", channel_id=sample_channel.id, model_id=f"down-{i}",
+                display_name=f"down-{i}", category="text", is_free=True,
+                health_status="down", is_active=True,
+                last_checked_at=datetime.now(timezone.utc) - timedelta(hours=6 - i),
+            ))
+        db_session.add(Setting(key=f"probe_daily_budget:{sample_channel.id}", value="2"))
+        db_session.commit()
+        # One non-passive probe already happened today → only 1 slot remains.
+        db_session.add(HealthRecord(
+            model_id="mdl-d0", status="down", response_ms=1, is_passive=False,
+            verification_method="active_baseline", checked_at=datetime.now(timezone.utc),
+        ))
+        db_session.commit()
+
+        with patch("services.health.active_probe", new=AsyncMock()) as mock_probe:
+            await reprobe_down_models()
+        assert mock_probe.await_count == 1
+        probed = mock_probe.await_args_list[0].args[0]
+        assert probed.id == "mdl-d0"  # oldest-checked first across the backlog
+
+    @pytest.mark.asyncio
+    async def test_reprobe_down_budget_exhausted_skips_channel(self, db_session, sample_channel):
+        from models import Setting
+        from services.health import reprobe_down_models
+
+        db_session.add(Model(
+            id="mdl-x", channel_id=sample_channel.id, model_id="down-x",
+            display_name="down-x", category="text", is_free=True,
+            health_status="down", is_active=True,
+        ))
+        db_session.add(Setting(key=f"probe_daily_budget:{sample_channel.id}", value="2"))
+        db_session.commit()
+        for i in range(2):
+            db_session.add(HealthRecord(
+                model_id="mdl-x", status="down", response_ms=1, is_passive=False,
+                verification_method="active_recheck", checked_at=datetime.now(timezone.utc),
+            ))
+        db_session.commit()
+
+        with patch("services.health.active_probe", new=AsyncMock()) as mock_probe:
+            n = await reprobe_down_models()
+        assert mock_probe.await_count == 0
+        assert n == 0
+
+    @pytest.mark.asyncio
+    async def test_discovery_baseline_respects_budget_but_manual_bypasses(
+        self, db_session, sample_channel
+    ):
+        from models import Setting
+        from services.health import probe_channel_models
+
+        for i in range(3):
+            db_session.add(Model(
+                id=f"mdl-u{i}", channel_id=sample_channel.id, model_id=f"unverified-{i}",
+                display_name=f"unverified-{i}", category="text", is_free=True,
+                health_status="unknown", is_active=True,
+            ))
+        db_session.add(Setting(key=f"probe_daily_budget:{sample_channel.id}", value="3"))
+        db_session.commit()
+        db_session.add(HealthRecord(
+            model_id="mdl-u0", status="slow", response_ms=1, is_passive=False,
+            verification_method="active_heartbeat", checked_at=datetime.now(timezone.utc),
+        ))
+        db_session.commit()
+
+        with patch("services.health.active_probe", new=AsyncMock()) as mock_probe:
+            await probe_channel_models(sample_channel.id, "active_baseline", only_unverified=True)
+        assert mock_probe.await_count == 2  # 3 budget - 1 used today
+
+        with patch("services.health.active_probe", new=AsyncMock()) as mock_probe:
+            await probe_channel_models(sample_channel.id, "manual")
+        assert mock_probe.await_count == 3  # explicit admin action bypasses
