@@ -143,12 +143,13 @@ async def review_model(
     from services.event_recheck import cancel_pending_rechecks
     cancel_pending_rechecks(model_id)
 
-    # Resolve every open policy_change notification for this model; the
+    # Resolve every open policy_change notification for this model (legacy
+    # keys carry a check_run suffix; current keys are one per model); the
     # adjudication supersedes the automatic suspicion.
     from services.notifications import resolve_notification, broadcast_notifications_updated
     open_alerts = session.exec(
         select(Notification)
-        .where(Notification.dedupe_key.startswith(f"policy_change:{model_id}:"))
+        .where(Notification.dedupe_key.startswith(f"policy_change:{model_id}"))
         .where(Notification.resolved_at == None)  # noqa: E711
     ).all()
     for row in open_alerts:

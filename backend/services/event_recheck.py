@@ -142,9 +142,11 @@ def _apply_confirmed_change(model_id: str, trigger_reason: str, check_run_id: st
         # Channel to key_invalid; do not rewrite the model's free classification.
         if (model.free_type, model.is_free) != (old_free_type, old_is_free):
             from services.notifications import upsert_notification
+            # One open alert per model (not per check run): a still-failing
+            # model updates its existing alert instead of stacking new ones.
             upsert_notification(
                 session,
-                dedupe_key=f"policy_change:{model.id}:{check_run_id}",
+                dedupe_key=f"policy_change:{model.id}",
                 category="policy_change",
                 severity="warning",
                 title=f"{model.model_id} 免费策略疑似变化",

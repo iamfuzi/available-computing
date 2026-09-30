@@ -47,11 +47,12 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
         .where(CandidateProvider.status == "pending")
         .where(CandidateProvider.admission_status == "review_required")
     ).all())
+    # "待确认" counts distinct models still awaiting a billing decision
+    # (is_free is None), not raw alerts — one model can re-flag many times.
     pending_policy_change_count = len(session.exec(
-        select(Notification)
-        .where(Notification.category == "policy_change")
-        .where(Notification.resolved_at == None)
-        .where(Notification.status != "dismissed")
+        select(Model)
+        .where(Model.is_free == None)  # noqa: E711
+        .where(Model.is_active == True)  # noqa: E712
     ).all())
     unread_notification_count = len(session.exec(
         select(Notification)

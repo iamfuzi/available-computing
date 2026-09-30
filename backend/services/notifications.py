@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from sqlmodel import Session, select
 
-from models import CandidateProvider, CandidateSourceState, Channel, Notification
+from models import CandidateProvider, CandidateSourceState, Channel, Model, Notification
 
 
 CHANNEL_ALERT_STATUSES = {"key_invalid", "key_expired", "suspended"}
@@ -150,6 +150,34 @@ def reconcile_notifications(session: Session) -> None:
             )
         else:
             resolve_notification(session, key)
+
+    # policy_change alerts track models awaiting manual billing review. Once a
+    # model leaves the suspect state — adjudicated via POST /models/{id}/review,
+    # re-classified by discovery, or removed — the alert must close, otherwise
+    # the pool overview keeps asking to confirm models that are already settled.
+    policy_rows = session.exec(
+        select(Notification)
+        .where(Notification.category == "policy_change")
+        .where(Notification.resolved_at == None)  # noqa: E711
+    ).all()
+    if policy_rows:
+        alert_model_ids = {
+            mid
+            for mid in (json.loads(r.payload_json or "{}").get("model_id") for r in policy_rows)
+            if mid
+        }
+        models_by_id = {}
+        if alert_model_ids:
+            models_by_id = {
+                m.id: m
+                for m in session.exec(select(Model).where(Model.id.in_(alert_model_ids))).all()
+            }
+        for row in policy_rows:
+            payload = json.loads(row.payload_json or "{}")
+            m = models_by_id.get(payload.get("model_id"))
+            still_pending = m is not None and m.is_active and m.is_free is None
+            if not still_pending:
+                resolve_notification(session, row.dedupe_key)
 
     session.commit()
 
