@@ -1,3 +1,5 @@
+import json
+
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select, func
 from datetime import datetime, timedelta, timezone
@@ -47,13 +49,21 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
         .where(CandidateProvider.status == "pending")
         .where(CandidateProvider.admission_status == "review_required")
     ).all())
-    # "待确认" counts distinct models still awaiting a billing decision
-    # (is_free is None), not raw alerts — one model can re-flag many times.
-    pending_policy_change_count = len(session.exec(
-        select(Model)
-        .where(Model.is_free == None)  # noqa: E711
-        .where(Model.is_active == True)  # noqa: E712
-    ).all())
+    # "待确认" = distinct models referenced by open policy_change alerts —
+    # the actionable manual-review queue. Reconcile has already closed zombie
+    # alerts (settled/removed models), and legacy per-run duplicates for one
+    # model must not inflate the number. Plain is_free IS NULL would also
+    # count ~70 whitelist-delisted catalog models nobody needs to review.
+    policy_alerts = session.exec(
+        select(Notification)
+        .where(Notification.category == "policy_change")
+        .where(Notification.resolved_at == None)  # noqa: E711
+        .where(Notification.status != "dismissed")
+    ).all()
+    pending_policy_change_count = len({
+        json.loads(r.payload_json or "{}").get("model_id")
+        for r in policy_alerts
+    } - {None})
     unread_notification_count = len(session.exec(
         select(Notification)
         .where(Notification.status == "unread")
