@@ -5,17 +5,25 @@ from .base import ProviderAdapter, ModelInfo, HealthInfo
 from config import PROBE_TIMEOUT_SECONDS, SLOW_RESPONSE_THRESHOLD_MS
 from services.rate_limit import parse_rate_limit_headers, parse_remaining_headers
 
-_CATEGORY_MAP = {
-    "whisper": "audio",
-    "llava": "vision",
-    "llama-guard": "text",
-}
+_CATEGORY_MARKERS = (
+    # audio endpoints (transcription / TTS) — never chat-routable
+    ("whisper", "audio"),
+    ("orpheus", "audio"),
+    ("canopylabs", "audio"),
+    ("playai", "audio"),
+    ("tts", "audio"),
+    # content-safety classifiers — callable via chat but semantically wrong
+    # for general routing; keep them out of the text pool
+    ("prompt-guard", "guard"),
+    ("safeguard", "guard"),
+)
 
 
 def _infer_category(model_id: str) -> str:
     lower = model_id.lower()
-    if "whisper" in lower:
-        return "audio"
+    for marker, category in _CATEGORY_MARKERS:
+        if marker in lower:
+            return category
     if "vision" in lower or "llava" in lower:
         return "vision"
     return "text"
@@ -74,7 +82,10 @@ class GroqAdapter(ProviderAdapter):
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "你是什么模型"}],
-            "max_tokens": 20,
+            # gpt-oss models reason first and return empty content when the
+            # budget is small (measured 2026-09-30: mt=20 → content='',
+            # reasoning filled; mt=200 → normal answer).
+            "max_tokens": 200,
         }
         start = time.monotonic()
         try:
@@ -93,26 +104,48 @@ class GroqAdapter(ProviderAdapter):
 
         if r.status_code == 200:
             try:
-                content = r.json()["choices"][0]["message"]["content"]
-                if not content or not content.strip():
+                message = r.json()["choices"][0]["message"]
+                content = (message.get("content") or "").strip()
+                reasoning = (message.get("reasoning") or "").strip()
+                # Reasoning models with a tight budget answer only in the
+                # reasoning field; that is still proof the model is serving.
+                if not content and not reasoning:
                     return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             except (KeyError, IndexError, TypeError):
                 return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"
             return HealthInfo(
                 status=status, response_ms=response_ms,
-                observed_rate_limit=parse_rate_limit_headers(r),
-                observed_remaining=parse_remaining_headers(r),
+                observed_rate_limit=self._groq_rate_limits(r),
+                observed_remaining=self._groq_remaining(r),
             )
         if r.status_code == 429:
             # 429 means the model is online but currently rate-limited — it's
             # not down. Mark it slow so it stays in the pool at lower priority
             # rather than being excluded entirely.
             return HealthInfo(status="slow", response_ms=response_ms, error_code="rate_limited",
-                              observed_rate_limit=parse_rate_limit_headers(r),
-                              observed_remaining=parse_remaining_headers(r))
+                              observed_rate_limit=self._groq_rate_limits(r),
+                              observed_remaining=self._groq_remaining(r))
         if r.status_code in (401, 403):
             return HealthInfo(status="down", response_ms=response_ms, error_code="auth_failed")
         if r.status_code == 404:
             return HealthInfo(status="down", response_ms=response_ms, error_code="not_found")
         return HealthInfo(status="slow", response_ms=response_ms, error_code="server_error")
+
+    @staticmethod
+    def _groq_rate_limits(r) -> dict | None:
+        """Groq's x-ratelimit-limit-requests is per-DAY, not per-minute
+        (measured 2026-09-30: 1000 = the free-tier RPD, alongside TPM 8000 in
+        limit-tokens). Re-key it as rpd so budgets don't read it as rpm=1000.
+        """
+        limits = parse_rate_limit_headers(r)
+        if limits and "rpm" in limits:
+            limits["rpd"] = limits.pop("rpm")
+        return limits
+
+    @staticmethod
+    def _groq_remaining(r) -> dict | None:
+        remaining = parse_remaining_headers(r)
+        if remaining and "rpm_remaining" in remaining:
+            remaining["rpd_remaining"] = remaining.pop("rpm_remaining")
+        return remaining

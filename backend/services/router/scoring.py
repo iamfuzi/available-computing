@@ -23,7 +23,7 @@ HEALTH_ORDER: dict[str, int] = {"healthy": 0, "slow": 1}
 RECENT_SCORE_LIMIT = 20
 
 # Categories that are not chat-completion targets (excluded from model resolution)
-NON_CHAT_CATEGORIES = {"audio", "image", "video", "embedding", "rerank"}
+NON_CHAT_CATEGORIES = {"audio", "image", "video", "embedding", "rerank", "guard"}
 
 
 def now_utc() -> datetime:

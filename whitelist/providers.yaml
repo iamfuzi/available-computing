@@ -3,9 +3,25 @@ updated_at: "2026-09-29"
 
 providers:
   groq:
-    free_strategy: all
-    free_type: permanent
-    notes: "Groq 全部模型当前永久免费，各模型速率限制不同"
+    free_strategy: whitelist
+    free_models:
+      # Groq free tier bills nothing (per-model RPM/RPD limits only), but only
+      # general-purpose chat models are routed. Audio endpoints (whisper /
+      # orpheus TTS) and safety classifiers (prompt-guard / safeguard) stay
+      # off the whitelist; the adapter also categories them out of the chat
+      # pool. Verified against the live catalog + rate-limits doc 2026-09-30.
+      - id: "openai/gpt-oss-120b"
+        free_type: permanent
+        param_size: 120
+        notes: "免费层 30 RPM / 1K RPD / 8K TPM"
+      - id: "openai/gpt-oss-20b"
+        free_type: permanent
+        param_size: 20
+        notes: "免费层 30 RPM / 1K RPD / 8K TPM；reasoning 模型"
+      - id: "qwen/qwen3.8-27b"
+        free_type: permanent
+        param_size: 27
+        notes: "免费层 30 RPM / 1K RPD / 8K TPM"
 
   siliconflow:
     free_strategy: whitelist
