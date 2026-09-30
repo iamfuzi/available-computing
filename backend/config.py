@@ -40,7 +40,12 @@ if not JWT_SECRET:
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_DAYS = 7
 
-PROBE_TIMEOUT_SECONDS = 10
+# ZhiPu free flash models routinely take 11–30s for a minimal completion
+# (glm-4.5-flash: ~11s thinking-off, ~28s thinking-on, measured 2026-09-30);
+# at 10s every probe of those models timed out and they never became
+# "verified" for concrete-model routing. Probes run sequentially in the
+# background, so patience is cheap.
+PROBE_TIMEOUT_SECONDS = int(os.environ.get("PROBE_TIMEOUT_SECONDS", "30"))
 SLOW_RESPONSE_THRESHOLD_MS = int(os.environ.get("SLOW_THRESHOLD_MS", "1000"))
 # How many consecutive transient upstream errors (5xx / network / timeout)
 # a model must accrue before being marked "down" and evicted from the

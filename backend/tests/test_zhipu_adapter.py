@@ -154,3 +154,26 @@ async def test_text_probe_multimodal_content_list_still_works():
     with patch("adapters.zhipu.httpx.AsyncClient", return_value=_client(response)):
         info = await ZhiPuAdapter().health_check("glm-4.6v-flash", "sk-test", _BASE)
     assert info.error_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_id", "expects_thinking_switch"),
+    [
+        ("glm-4.5-flash", True),
+        ("glm-4.7-flash", True),
+        ("glm-4.6v-flash", True),
+        ("glm-z1-flash", False),   # older series: fast, keep legacy payload
+        ("glm-4-flash", False),
+    ],
+)
+async def test_thinking_switch_only_for_supported_series(model_id, expects_thinking_switch):
+    # 4.5+ series probes disable thinking (28s → 11s latency); older ids keep
+    # the legacy payload.
+    response = httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    client = _client(response)
+    with patch("adapters.zhipu.httpx.AsyncClient", return_value=client):
+        await ZhiPuAdapter().health_check(model_id, "sk-test", _BASE)
+    _, kwargs = client.post.call_args
+    has_switch = "thinking" in kwargs["json"]
+    assert has_switch is expects_thinking_switch

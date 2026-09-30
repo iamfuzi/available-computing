@@ -87,6 +87,13 @@ class ZhiPuAdapter(ProviderAdapter):
         # ZhiPu doesn't expose pricing in the models API; rely on whitelist
         return None
 
+    # GLM series whose API accepts the `thinking` switch. Disabling thinking
+    # in probes cuts their latency by ~60% (glm-4.5-flash: 28s → 11s) and the
+    # probe only needs proof the model serves, not a thoughtful answer. Older
+    # ids (z1, 4-flash) ignore unknown fields, but we keep the legacy payload
+    # for them since they are fast anyway.
+    _THINKING_SWITCH_PREFIXES = ("glm-4.5", "glm-4.6", "glm-4.7", "glm-4.8", "glm-5")
+
     async def health_check(self, model_id: str, key: str, base_url: str) -> HealthInfo:
         if _infer_category(model_id) == "image":
             return await self._health_check_image(model_id, key, base_url)
@@ -100,6 +107,8 @@ class ZhiPuAdapter(ProviderAdapter):
             # misclassified "empty_response"/down (glm-4.7-flash, 2026-09-30).
             "max_tokens": 200,
         }
+        if model_id.startswith(self._THINKING_SWITCH_PREFIXES):
+            payload["thinking"] = {"type": "disabled"}
         start = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=PROBE_TIMEOUT_SECONDS) as client:
