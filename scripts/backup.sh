@@ -5,7 +5,9 @@ set -euo pipefail
 
 ac_root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ac_database="${1:-$ac_root_dir/backend/data/db.sqlite}"
-ac_backup_dir="$ac_root_dir/backend/data/backups"
+# backend/data 由容器以 root 写入，普通用户无法在其下建目录；
+# 默认输出到用户主目录，可用 AC_BACKUP_DIR 覆盖
+ac_backup_dir="${AC_BACKUP_DIR:-$HOME/ac-backups}"
 ac_timestamp="$(date '+%Y%m%d-%H%M%S')"
 ac_backup="$ac_backup_dir/available-computing-$ac_timestamp.db"
 
