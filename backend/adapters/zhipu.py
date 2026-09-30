@@ -94,7 +94,11 @@ class ZhiPuAdapter(ProviderAdapter):
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "你是什么模型"}],
-            "max_tokens": 20,
+            # Reasoning-style GLM models (4.7-flash / z1 / 4.5-flash) spend a
+            # small budget entirely on the reasoning_content field and return
+            # empty content — with max_tokens=20 every such model was
+            # misclassified "empty_response"/down (glm-4.7-flash, 2026-09-30).
+            "max_tokens": 200,
         }
         start = time.monotonic()
         try:
@@ -113,7 +117,8 @@ class ZhiPuAdapter(ProviderAdapter):
 
         if r.status_code == 200:
             try:
-                content = r.json()["choices"][0]["message"]["content"]
+                message = r.json()["choices"][0]["message"]
+                content = message.get("content")
                 # ZhiPu may return content as a string or as a list of
                 # multimodal parts ([{"type":"text","text":"..."}]).
                 if isinstance(content, list):
@@ -123,7 +128,12 @@ class ZhiPuAdapter(ProviderAdapter):
                 else:
                     text = content or ""
                 if not text.strip():
-                    return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
+                    # Thinking models answer only in reasoning_content when the
+                    # budget is tight; that is still proof the model is serving.
+                    reasoning = (message.get("reasoning_content")
+                                 or message.get("reasoning") or "").strip()
+                    if not reasoning:
+                        return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             except (KeyError, IndexError, TypeError, AttributeError):
                 return HealthInfo(status="down", response_ms=response_ms, error_code="empty_response")
             status = "healthy" if response_ms < SLOW_RESPONSE_THRESHOLD_MS else "slow"

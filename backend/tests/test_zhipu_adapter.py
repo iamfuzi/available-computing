@@ -100,3 +100,57 @@ async def test_image_probe_timeout_is_slow():
     assert info.status == "slow"
     assert info.error_code == "timeout"
     assert info.response_ms >= 60000
+
+
+# ── text probe: reasoning models must not be misclassified ────────────────
+
+
+@pytest.mark.asyncio
+async def test_text_probe_reasoning_only_content_is_alive():
+    # Thinking GLM models (4.7-flash / 4.5-flash) answer in reasoning_content
+    # when the token budget is tight; empty content alone must not mean down.
+    response = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": "", "reasoning_content": "thinking..."}}]},
+    )
+    with patch("adapters.zhipu.httpx.AsyncClient", return_value=_client(response)):
+        info = await ZhiPuAdapter().health_check("glm-4.7-flash", "sk-test", _BASE)
+    assert info.status in {"healthy", "slow"}
+    assert info.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_text_probe_content_and_reasoning_both_empty_is_down():
+    response = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": "", "reasoning_content": ""}}]},
+    )
+    with patch("adapters.zhipu.httpx.AsyncClient", return_value=_client(response)):
+        info = await ZhiPuAdapter().health_check("glm-4.7-flash", "sk-test", _BASE)
+    assert info.status == "down"
+    assert info.error_code == "empty_response"
+
+
+@pytest.mark.asyncio
+async def test_text_probe_budget_leaves_room_for_reasoning():
+    response = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": "我是GLM"}}]},
+    )
+    client = _client(response)
+    with patch("adapters.zhipu.httpx.AsyncClient", return_value=client):
+        await ZhiPuAdapter().health_check("glm-4.5-flash", "sk-test", _BASE)
+    _, kwargs = client.post.call_args
+    assert kwargs["json"]["max_tokens"] >= 200
+
+
+@pytest.mark.asyncio
+async def test_text_probe_multimodal_content_list_still_works():
+    # content as a list of parts (vision models answering text) keeps working.
+    response = httpx.Response(
+        200,
+        json={"choices": [{"message": {"content": [{"type": "text", "text": "ok"}]}}]},
+    )
+    with patch("adapters.zhipu.httpx.AsyncClient", return_value=_client(response)):
+        info = await ZhiPuAdapter().health_check("glm-4.6v-flash", "sk-test", _BASE)
+    assert info.error_code is None
