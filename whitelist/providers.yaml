@@ -70,13 +70,10 @@ providers:
         rate_limit:
           rpm: 10
         notes: "官方 Agnes-help-skill 变更记录点名的现行文本模型（与 3.0-flash 同批）；轻量、面向编码/Agent 工作流"
-      - id: "agnes-2.0-flash"
-        free_type: permanent
-        rate_limit:
-          rpm: 10
-        notes: "旧免费线，保留待探测；若官方已下线会自然转 down"
       # 仍不白名单：
-      # - agnes-1.5-flash / agnes-2.5-pro(-alpha/-beta): 免费状态未获官方确认。
+      # - agnes-2.0-flash / agnes-1.5-flash: 官方在售线已升级至 2.5/3.0-flash，
+      #   旧线移出白名单（2026-09-30，用户对齐官方控制台）。
+      # - agnes-2.5-pro(-alpha/-beta): 免费状态未获官方确认。
       # - agnes-image-* / agnes-video-*: 生成类模型拒绝 chat 请求；探测它们
       #   只会失败并烧掉共享 RPM 配额（≈10/分钟）。
       # param_size intentionally omitted: Agnes does not publish it, and the
