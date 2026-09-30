@@ -4,6 +4,29 @@
 
 ## [未发布]
 
+### 2026-09-30 生产诊断与修复批次
+
+**探测体系（三份适配器同款误杀修复）**
+- OpenRouter/智谱/Groq 探测 `max_tokens=20` 使 reasoning 型免费模型 content 恒空 → 误判 empty_response；预算提至 200 且思考字段非空即视为存活（`reasoning` / `reasoning_content`）。智谱 4.5+ 系探测附带 `thinking:{type:disabled}`（探测延迟 28s→5s），探测超时默认 10s→30s 且 env 可配
+- 401/403 一律归 auth_failed 导致渠道被误标 key_invalid（实为地区/客户端类型限制）→ 按错误体分类 `access_restricted`；渠道级失效须 validate_key 复核；恢复自动关闭告警
+- 429 区分平台配额（error_type）与上游过载（provider_code）；流式 SSE 中途错误事件（`error`/`finish_reason:"error"`）计入健康并走 429 冷却；解析裸 `X-RateLimit-*` 头；Groq limit-requests 头单位为 RPD
+
+**限流与探活**
+- 新增 per-channel 探测日预算 `probe_daily_budget:<id>`（心跳/发现基线/down 重探共用，manual 不受限）
+- 新增渠道级 TPM 防护 `provider_tpm:<id>`：非流式按 usage 精确计量、流式按 SSE 字节估算，超限本地换道
+- 全渠道 RPM/探活预算按官方文档+实测校准（OR 15/6、Groq 60、智谱 30/10、硅基 300、Kilo 3/20、Agnes 10、讯飞 30）
+- `flush_usage` 加 misfire 宽限，消除每分钟的调度告警噪音
+
+**渠道接入**
+- Groq 渠道上线（经主机 v2ray 代理出海，容器 HTTP(S)_PROXY + NO_PROXY 直连白名单）；白名单显式三条 gpt-oss-120b/20b、qwen3.8-27b；音频端点与安全分类器（guard 新类别）不入聊天池
+- 智谱免费线对齐官方文档：新增 glm-4.5-flash（目录不返回、靠白名单入池）；glm-z1-flash 官方已不列、实测可用保留观察
+
+**可观测性与运维**
+- 新增请求级日志表 RequestLog（7 天保留）+ `GET /api/v1/pool/request-logs` 查询端点；错误路径经 `_make_ac_error` 单点埋记
+- `/v1/models` 跨渠道去重（同 `:free` slug 双渠道只列最优可路由副本）
+- `scripts/deploy-host.sh` 固化生产容器全部配置（含代理）+ docker 日志轮转；`backup.sh`/`check-backup.sh` 改用 python3（无 sqlite3 CLI 依赖）并输出 `~/ac-backups`
+- 6 个真死模型人工裁定出池（lyria 地区锁、inkling 客户端门槛）
+
 ### 新增 (Added)
 - **候选厂商详细视图功能** - 候选厂商页面新增可点击统计卡片和详细筛选功能
   - 四种筛选类型：可继续审核、OpenAI 兼容候选、准入排除、抓取来源

@@ -5,7 +5,7 @@ from sqlmodel import Session, select, func
 from datetime import datetime, timedelta, timezone
 
 from database import get_session
-from models import CandidateProvider, HealthRecord, Notification, Channel, Model
+from models import CandidateProvider, HealthRecord, Notification, Channel, Model, RequestLog
 from api.auth import verify_token
 from services.notifications import CHANNEL_ALERT_STATUSES, reconcile_notifications
 
@@ -89,3 +89,33 @@ def pool_summary(session: Session = Depends(get_session), _=Depends(verify_token
         "recheck_count_24h": recheck_count_24h,
         "unread_notification_count": unread_notification_count,
     }
+
+
+@router.get("/request-logs")
+def list_request_logs(
+    limit: int = 100,
+    outcome: str | None = None,
+    session: Session = Depends(get_session),
+    _=Depends(verify_token),
+):
+    """Recent terminal proxy requests (7-day retention).
+
+    Filters: ?outcome=fail / success / rejected_local. Post-mortem companion
+    to the dashboard — answers "what exactly failed and on which provider"
+    after docker logs have rotated away.
+    """
+    stmt = select(RequestLog).order_by(RequestLog.ts.desc()).limit(min(max(limit, 1), 500))
+    if outcome:
+        stmt = stmt.where(RequestLog.outcome == outcome)
+    rows = session.exec(stmt).all()
+    return [
+        {
+            "ts": r.ts.isoformat(), "request_id": r.request_id,
+            "api_key_id": r.api_key_id, "category": r.category,
+            "requested_model": r.requested_model, "selected_model": r.selected_model,
+            "provider": r.provider, "outcome": r.outcome,
+            "status_code": r.status_code, "error_code": r.error_code,
+            "latency_ms": r.latency_ms, "attempted": r.attempted,
+        }
+        for r in rows
+    ]

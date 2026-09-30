@@ -1660,3 +1660,80 @@ class TestProxyStreamErrorEvents:
             pass
         db_session.refresh(sample_model)
         assert sample_model.consecutive_errors == 0
+
+    @pytest.mark.asyncio
+    async def test_dedups_same_model_id_across_channels(self, app_client, auth_headers, db_session, sample_model, sample_channel):
+        # OpenRouter / Kilo expose identical :free slugs — the caller must see
+        # one entry, backed by the best routable copy.
+        from models import Model, Channel as Ch
+        from services.crypto import encrypt
+        import base64
+        db_session.add(Ch(
+            id="ch-kilo", provider_type="kilo-code", name="Kilo",
+            api_key_enc="", enabled=True,
+        ))
+        twin = Model(
+            id="mdl-twin", channel_id="ch-kilo", model_id=sample_model.model_id,
+            is_free=True, is_active=True, health_status="slow",
+        )
+        db_session.add(twin)
+        db_session.commit()
+        resp = await app_client.get("/v1/models", headers=auth_headers)
+        ids = [m["id"] for m in resp.json()["data"]]
+        assert ids.count(sample_model.model_id) == 1
+
+    @pytest.mark.asyncio
+    async def test_dedup_falls_back_to_twin_when_best_copy_cooling(self, app_client, auth_headers, db_session, sample_model, sample_channel):
+        from models import Model, Channel as Ch
+        db_session.add(Ch(id="ch-kilo2", provider_type="kilo-code", name="Kilo2", api_key_enc="", enabled=True))
+        twin = Model(
+            id="mdl-twin2", channel_id="ch-kilo2", model_id=sample_model.model_id,
+            is_free=True, is_active=True, health_status="slow",
+        )
+        db_session.add(twin)
+        sample_model.health_status = "rate_limited"
+        sample_model.rate_limited_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+        db_session.add(sample_model)
+        db_session.commit()
+        resp = await app_client.get("/v1/models", headers=auth_headers)
+        ids = [m["id"] for m in resp.json()["data"]]
+        # 主副本冷却中，孪生副本顶上，条目不消失
+        assert sample_model.model_id in ids
+        assert ids.count(sample_model.model_id) == 1
+
+
+class TestRequestLog:
+    @pytest.mark.asyncio
+    async def test_success_and_error_paths_write_rows(self, app_client, auth_headers, sample_model, sample_channel):
+        from sqlmodel import select
+        from database import engine
+        from models import RequestLog
+        with patch("httpx.AsyncClient") as MockClient:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"id": "c1", "choices": [{"message": {"content": "hi"}}]}
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_cm.post = AsyncMock(return_value=mock_resp)
+            MockClient.return_value = mock_cm
+            resp = await app_client.post("/v1/chat/completions", headers=auth_headers, json={
+                "model": "test-model-free", "messages": [{"role": "user", "content": "hi"}],
+            })
+            assert resp.status_code == 200
+        resp2 = await app_client.post("/v1/chat/completions", headers=auth_headers, json={
+            "model": "no-such-model", "messages": [{"role": "user", "content": "hi"}],
+        })
+        assert resp2.status_code == 404
+        from sqlmodel import Session as _Session
+        with _Session(engine) as s:
+            rows = s.exec(select(RequestLog).order_by(RequestLog.id)).all()
+        outcomes = [r.outcome for r in rows]
+        assert "success" in outcomes and "fail" in outcomes
+        fail_row = next(r for r in rows if r.outcome == "fail")
+        assert fail_row.status_code == 404
+        assert fail_row.requested_model == "no-such-model"
+
+    def test_log_helper_never_raises(self):
+        from api.proxy import _log_proxy_request
+        _log_proxy_request(category=None, request_id=None, requested_model=None, outcome="success")

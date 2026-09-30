@@ -362,3 +362,56 @@ class TestRPMThrottle:
             proxy._check_model_budget(sample_model, db_session)
         assert exc.value.reason == "local_provider_rpm_exceeded"
         proxy._provider_rpm_cache.clear()
+
+
+class TestProviderTpmBudget:
+    """Channel-level tokens-per-minute cap (Setting provider_tpm:<channel_id>).
+    Groq's free tier prices 8K tokens/min per model — request-count limits
+    can't protect that, two large requests can trip it with RPM idle."""
+
+    def _reset(self):
+        from api import proxy as proxy_mod
+        proxy_mod._provider_tpm_windows.clear()
+        proxy_mod._provider_tpm_cache.clear()
+
+    def test_tpm_exceeded_raises_local_budget(self, db_session, sample_model, sample_channel):
+        from models import Setting
+        from api import proxy as proxy_mod
+        from api.proxy import _check_model_budget, _record_provider_tokens, ModelBudgetExceeded
+        self._reset()
+        db_session.add(Setting(key=f"provider_tpm:{sample_channel.id}", value="100"))
+        db_session.commit()
+        _record_provider_tokens(sample_channel.id, 150)
+        with pytest.raises(ModelBudgetExceeded) as exc:
+            _check_model_budget(sample_model, db_session)
+        assert exc.value.reason == "local_provider_tpm_exceeded"
+
+    def test_tpm_unset_means_unlimited(self, db_session, sample_model, sample_channel):
+        from api import proxy as proxy_mod
+        from api.proxy import _check_model_budget, _record_provider_tokens
+        self._reset()
+        _record_provider_tokens(sample_channel.id, 10_000_000)
+        _check_model_budget(sample_model, db_session)  # 不抛异常
+
+    def test_tpm_window_slides(self, db_session, sample_model, sample_channel):
+        import time as _time
+        from models import Setting
+        from api import proxy as proxy_mod
+        from api.proxy import _check_model_budget, _record_provider_tokens, _provider_tpm_windows
+        from api.proxy import ModelBudgetExceeded
+        self._reset()
+        db_session.add(Setting(key=f"provider_tpm:{sample_channel.id}", value="100"))
+        db_session.commit()
+        _record_provider_tokens(sample_channel.id, 150)
+        # 把记录时间拨到窗口外，占用应归零
+        _provider_tpm_windows[sample_channel.id] = [
+            (_time.monotonic() - 120, 150)
+        ]
+        _check_model_budget(sample_model, db_session)
+
+    def test_stream_token_estimation_arithmetic(self):
+        # _proxy_stream 记录 sse_bytes // 6：360 字节 ≈ 60 token
+        from api.proxy import _PROVIDER_TPM_SSE_BYTES_PER_TOKEN, _record_provider_tokens, _provider_tpm_used
+        sse_bytes = 360
+        _record_provider_tokens("ch-x", sse_bytes // _PROVIDER_TPM_SSE_BYTES_PER_TOKEN)
+        assert _provider_tpm_used("ch-x") == 60

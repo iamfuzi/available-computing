@@ -100,12 +100,17 @@ def init_scheduler(get_key_fn=None):
 
     # Flush in-process per-key usage counters into the keyusageday table.
     # Frequent + idempotent (upsert), so a missed run only delays visibility.
+    # The 1.2s systematic scheduling lag under WSL2 skipped every run at the
+    # default 1s grace; 30s keeps the flush while silencing the misfire log
+    # spam (usage visibility is unaffected — coalesce drops stale runs).
     from services.usage import flush_usage
     scheduler.add_job(
         flush_usage,
         IntervalTrigger(seconds=60),
         id="flush_usage",
         replace_existing=True,
+        misfire_grace_time=30,
+        coalesce=True,
     )
 
     scheduler.start()

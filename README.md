@@ -181,11 +181,11 @@ npm install
 运行中的 SQLite 数据库必须使用 SQLite 在线备份，不能直接复制 WAL 模式下的单个 `db.sqlite`：
 
 ```bash
-# 创建权限为 600 的一致性备份；命令会输出备份路径
+# 创建权限为 600 的一致性备份；命令会输出备份路径（python3 实现，无需 sqlite3 CLI）
 ./scripts/backup.sh
 
 # 在隔离临时目录中升级迁移并校验完整性，不修改生产数据库
-./scripts/check-backup.sh backend/data/backups/available-computing-YYYYMMDD-HHMMSS.db
+./scripts/check-backup.sh ~/ac-backups/available-computing-YYYYMMDD-HHMMSS.db
 ```
 
 `backend/data/`、`secrets/` 和 `.env` 均被 Git 忽略。代理 Key 可在本地管理页查看和复制，因此管理页与数据库也属于敏感资产；不要把任何 Key 粘贴到代码、提交记录、日志或聊天中。

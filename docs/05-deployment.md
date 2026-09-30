@@ -293,3 +293,45 @@ docker compose logs --tail=100 app
 ### 如何安全提交问题
 
 附上版本、运行模式、错误时间、HTTP 状态和脱敏后的日志。必须移除 `Authorization`、Cookie、上游 Key、`ac_` Key、管理员密码以及包含这些值的请求体。
+
+---
+
+## 9. mini 主机生产部署（实际运行环境）
+
+> 生产实例不使用 docker compose（主机未安装），部署命令固化在仓库脚本中。
+
+### 9.1 部署流程
+
+```bash
+# 在 mini 主机上（openclaw 管理的 clone）
+cd ~/.openclaw/workspace/available-computing
+git pull origin main
+./scripts/deploy-host.sh            # 构建镜像 + 按标准配置重建容器
+SKIP_BUILD=1 ./scripts/deploy-host.sh   # 代码未变只重启容器
+```
+
+`scripts/deploy-host.sh` 是生产容器配置的**唯一权威定义**（端口、挂载、全部环境变量）。修改生产配置应改脚本并提交，不要手工 `docker run`——漏掉出口代理变量会使 Groq/Kilo 渠道静默失效。
+
+### 9.2 出口代理（重要）
+
+mini 主机公网出口在境外边缘节点（实测 Groq 返回 403、Kilo TLS 阻断），容器通过主机 v2ray（HTTP 入站 `0.0.0.0:10810`）出海：
+
+- `HTTP_PROXY` / `HTTPS_PROXY` = `http://172.17.0.1:10810`（docker 网桥网关）
+- `NO_PROXY` = 智谱、硅基流动、讯飞、Agnes、OpenRouter（国内及已验证直连可达的渠道）
+
+以上已内置于部署脚本默认值，可用 `AC_PROXY_ADDR` / `AC_NO_PROXY` / `AC_DISABLE_PROXY` 覆盖。
+
+### 9.3 备份
+
+- `scripts/backup.sh`：SQLite 在线备份（python3 标准库实现，无需 sqlite3 CLI），输出 `~/ac-backups/`，保留 14 份，已由主机 cron 每天 03:30 执行。
+- 主机周四的 openclaw tar 备份已排除 `backend/data`（直接打包 WAL 模式运行库是不安全的）。
+
+### 9.4 运维速查
+
+| 操作 | 方法 |
+|---|---|
+| 请求级失败排查 | `GET /api/v1/pool/request-logs?outcome=fail&limit=100`（保留 7 天） |
+| 渠道限速调整 | Setting `provider_rpm:<渠道id>` / `provider_tpm:<渠道id>`（token/分钟，可不设） |
+| 探测日预算 | Setting `probe_daily_budget:<渠道id>`（心跳/基线/down 重探共用；manual 手动探测不受限） |
+| 重新触发渠道发现 | `POST /api/v1/channels/{id}/probe`（admin JWT） |
+| 容器日志 | `docker logs available-computing`（已配 json-file 10m×3 轮转；重建即丢，重要信息靠请求日志表） |

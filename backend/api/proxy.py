@@ -364,6 +364,53 @@ def _passive_channel_call_count(session: Session, channel_id: str, since: dateti
 _provider_rpm_cache: dict[str, tuple[float, int | None]] = {}
 _PROVIDER_RPM_CACHE_TTL_SECONDS = 30.0
 
+# Channel-level token-per-minute tracking (soft cap via Setting
+# provider_tpm:<channel_id>). Request-count limits can't protect providers
+# whose binding quota is tokens — Groq's free tier allows only 8K TPM per
+# model, so two large-context requests per minute can trip it while RPM sits
+# idle. Non-streaming responses record the exact usage.total_tokens; streams
+# estimate from SSE bytes (no usage object mid-stream) — an under-estimate is
+# preferred over blocking legitimate traffic.
+_provider_tpm_windows: dict[str, list[tuple[float, int]]] = {}
+_PROVIDER_TPM_WINDOW_SECONDS = 60.0
+_PROVIDER_TPM_SSE_BYTES_PER_TOKEN = 6  # JSON overhead incl., rough middle ground
+_provider_tpm_cache: dict[str, tuple[float, int | None]] = {}
+
+
+def _record_provider_tokens(channel_id: str, tokens: int) -> None:
+    if tokens <= 0:
+        return
+    now = time.monotonic()
+    window = [e for e in _provider_tpm_windows.get(channel_id, [])
+              if e[0] > now - _PROVIDER_TPM_WINDOW_SECONDS]
+    window.append((now, tokens))
+    _provider_tpm_windows[channel_id] = window
+
+
+def _provider_tpm_used(channel_id: str) -> int:
+    now = time.monotonic()
+    return sum(t for ts, t in _provider_tpm_windows.get(channel_id, [])
+               if ts > now - _PROVIDER_TPM_WINDOW_SECONDS)
+
+
+def _effective_provider_tpm(session: Session, channel_id: str) -> int | None:
+    """Tokens-per-minute cap for a channel; None means unlimited."""
+    now = time.monotonic()
+    cached = _provider_tpm_cache.get(channel_id)
+    if cached and cached[0] > now:
+        return cached[1]
+    from models import Setting
+
+    row = session.get(Setting, f"provider_tpm:{channel_id}")
+    try:
+        tpm = int(row.value) if row and row.value not in (None, "") else None
+    except (TypeError, ValueError):
+        tpm = None
+    if tpm is not None and tpm <= 0:
+        tpm = None
+    _provider_tpm_cache[channel_id] = (now + _PROVIDER_RPM_CACHE_TTL_SECONDS, tpm)
+    return tpm
+
 
 def _channel_rpm_override(session: Session, channel_id: str) -> int | None:
     now = time.monotonic()
@@ -422,6 +469,10 @@ def _check_model_budget(model: Model, session: Session) -> None:
         since = now - timedelta(seconds=60)
         if _passive_channel_call_count(session, model.channel_id, since) >= provider_rpm:
             raise ModelBudgetExceeded(60, "local_provider_rpm_exceeded")
+
+    tpm_limit = _effective_provider_tpm(session, model.channel_id)
+    if tpm_limit and _provider_tpm_used(model.channel_id) >= tpm_limit:
+        raise ModelBudgetExceeded(60, "local_provider_tpm_exceeded")
 
 
 def _upstream_headers(adapter, key: str) -> dict[str, str]:
@@ -488,9 +539,12 @@ async def _proxy_stream(
     start = time.monotonic()
     error_code = None
     rate_limited_mid_stream = False
+    sse_bytes = 0
     try:
         async for line in response.aiter_lines():
             yield line + "\n\n"
+            if line.startswith("data:"):
+                sse_bytes += len(line)
             if line.startswith("data:") and '"error"' in line:
                 try:
                     chunk = json.loads(line[5:].strip())
@@ -516,6 +570,9 @@ async def _proxy_stream(
         error_code = "network_error"
     finally:
         ms = int((time.monotonic() - start) * 1000)
+        # Streams carry no usage object — estimate tokens from SSE bytes so the
+        # channel TPM window still sees streaming traffic.
+        _record_provider_tokens(channel_id, sse_bytes // _PROVIDER_TPM_SSE_BYTES_PER_TOKEN)
         if rate_limited_mid_stream:
             with Session(engine) as session:
                 record_rate_limit(model_id, None, session, response_ms=ms)
@@ -578,6 +635,37 @@ def _is_channel_billing_failure(channel: Channel, status_code: int, response_tex
     return False
 
 
+def _log_proxy_request(
+    *,
+    category: str | None,
+    request_id: str | None,
+    requested_model: str | None,
+    outcome: str,
+    status_code: int | None = None,
+    error_code: str | None = None,
+    selected_model: str | None = None,
+    provider: str | None = None,
+    latency_ms: int | None = None,
+    attempted: list[str] | None = None,
+    api_key_id: str | None = None,
+) -> None:
+    """Persist one terminal request row (7-day retention). Diagnostics must
+    never break proxying, so failures are swallowed with a log line."""
+    try:
+        from models import RequestLog
+        with Session(engine) as log_session:
+            log_session.add(RequestLog(
+                request_id=request_id, api_key_id=api_key_id, category=category or "",
+                requested_model=requested_model, selected_model=selected_model,
+                provider=provider, outcome=outcome, status_code=status_code,
+                error_code=error_code, latency_ms=latency_ms,
+                attempted=",".join(attempted) if attempted else None,
+            ))
+            log_session.commit()
+    except Exception:
+        logger.exception("request log write failed")
+
+
 def _make_ac_error(
     status_code: int,
     message: str,
@@ -598,6 +686,17 @@ def _make_ac_error(
     ``Retry-After`` header. Existing call sites pass the legacy positional
     args; HTTP entrypoints additionally pass ``request_id`` from the request.
     """
+    # Every error response funnels through here — one place to make failures
+    # survivable in the request log after docker logs are gone.
+    _log_proxy_request(
+        category=None,
+        request_id=request_id,
+        requested_model=route,
+        outcome="fail",
+        status_code=status_code,
+        error_code=code,
+        attempted=attempted_models,
+    )
     return errors.make_ac_error(
         status_code,
         message,
@@ -863,8 +962,15 @@ def list_openai_models(
     models = _apply_routing_policy(models, _effective_routing_policy(auth), session)
     channels = {ch.id: ch for ch in session.exec(select(Channel)).all()}
 
+    # The same upstream :free model can exist on several channels (OpenRouter
+    # and Kilo expose identical slugs). Callers get one entry per model_id —
+    # the best routable copy (routing order; a cooled-down or ineligible copy
+    # yields to its twin instead of suppressing the entry).
     data = []
-    for m in models:
+    listed_ids: set[str] = set()
+    for m in sorted(models, key=lambda x: _route_score_key(x, session)):
+        if m.model_id in listed_ids:
+            continue
         if _is_cooling_down(m):
             continue
         if not _channel_route_eligible(channels.get(m.channel_id)):
@@ -877,6 +983,7 @@ def list_openai_models(
         else:
             if not _is_pool_eligible(m, session):
                 continue
+        listed_ids.add(m.model_id)
         data.append({
             "id": m.model_id,
             "object": "model",
@@ -1096,8 +1203,14 @@ async def chat_completions(
                     request_id, channel.provider_type, model.model_id,
                     int((time.monotonic() - start) * 1000), upstream_attempts_made,
                 )
-                record_usage(_usage_key_id, "chat", "success")
-                return StreamingResponse(
+            record_usage(_usage_key_id, "chat", "success")
+            _log_proxy_request(
+                category="chat", request_id=request_id, api_key_id=_usage_key_id,
+                requested_model=original_model, selected_model=model.model_id,
+                provider=channel.provider_type, outcome="success", status_code=200,
+                latency_ms=ms, attempted=attempted,
+            )
+            return StreamingResponse(
                     _proxy_stream(response, client, model.id, channel.id, key, slot_key),
                     media_type="text/event-stream",
                     headers={
@@ -1197,11 +1310,19 @@ async def chat_completions(
             await record_passive_health(model.id, ms, None, channel.id, key)
             clear_billing_failures(model.id, session)
             clear_rate_limit(model.id, session)
+            _usage = (response_payload.get("usage") or {}).get("total_tokens")
+            _record_provider_tokens(channel.id, _usage if isinstance(_usage, int) else 0)
             logger.info(
                 "upstream ok request_id=%s provider=%s model=%s status=200 ms=%s attempt=%d",
                 request_id, channel.provider_type, model.model_id, ms, upstream_attempts_made,
             )
             record_usage(_usage_key_id, "chat", "success")
+            _log_proxy_request(
+                category="chat", request_id=request_id, api_key_id=_usage_key_id,
+                requested_model=original_model, selected_model=model.model_id,
+                provider=channel.provider_type, outcome="success", status_code=200,
+                latency_ms=ms, attempted=attempted,
+            )
             return JSONResponse(
                 content=response_payload,
                 status_code=200,
@@ -1392,6 +1513,15 @@ async def _proxy_passthrough(
         await record_passive_health(model.id, ms, None, channel.id, key)
         clear_billing_failures(model.id, session)
         clear_rate_limit(model.id, session)
+        _passthrough_category = {
+            "embeddings": "embedding", "rerank": "rerank",
+        }.get(path_suffix, "image" if "image" in path_suffix else path_suffix)
+        _log_proxy_request(
+            category=_passthrough_category, request_id=None, api_key_id=None,
+            requested_model=route, selected_model=model.model_id,
+            provider=channel.provider_type, outcome="success", status_code=200,
+            latency_ms=ms, attempted=trace,
+        )
         return JSONResponse(
             content=r.json(),
             status_code=200,

@@ -42,6 +42,7 @@ docker rm -f available-computing 2>/dev/null || true
 docker run -d --name available-computing \
     -p "${PORT}:8080" \
     --restart unless-stopped \
+    --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
     -v "$PWD/secrets/admin_password.txt:/run/secrets/ac_admin_password" \
     -v "$PWD/secrets/jwt_secret.txt:/run/secrets/ac_jwt_secret" \
     -v "$PWD/backend/data:/app/data" \

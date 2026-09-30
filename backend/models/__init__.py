@@ -6,9 +6,10 @@ from .apikey import ApiKey
 from .candidate_provider import CandidateProvider, CandidateSourceState
 from .notification import Notification
 from .usage import KeyUsageDay
+from .request_log import RequestLog
 
 __all__ = [
     "Channel", "Model", "HealthRecord", "Setting", "ApiKey",
     "CandidateProvider", "CandidateSourceState", "Notification",
-    "KeyUsageDay",
+    "KeyUsageDay", "RequestLog",
 ]
