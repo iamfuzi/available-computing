@@ -1,13 +1,31 @@
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Literal
+
 from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from database import get_session
-from models import Model, HealthRecord, Channel
+from models import Model, HealthRecord, Channel, Notification
 from api.auth import verify_token
 
 router = APIRouter()
+
+
+class ModelReviewRequest(BaseModel):
+    decision: Literal["paid", "free"]
+    # Only meaningful for decision="free"; defaults to permanent.
+    free_type: Optional[Literal["permanent", "quota", "grant"]] = None
+
+
+def _model_with_provider(session: Session, m: Model) -> dict:
+    ch = session.get(Channel, m.channel_id)
+    return {
+        **m.model_dump(),
+        "provider_type": ch.provider_type if ch else None,
+        "provider_name": ch.name if ch else None,
+        "base_url": ch.base_url if ch else None,
+    }
 
 
 @router.get("")
@@ -91,13 +109,55 @@ def get_model(
     m = session.get(Model, model_id)
     if not m:
         raise HTTPException(404)
-    ch = session.get(Channel, m.channel_id)
-    return {
-        **m.model_dump(),
-        "provider_type": ch.provider_type if ch else None,
-        "provider_name": ch.name if ch else None,
-        "base_url": ch.base_url if ch else None,
-    }
+    return _model_with_provider(session, m)
+
+
+@router.post("/{model_id}/review")
+async def review_model(
+    model_id: str,
+    body: ModelReviewRequest,
+    session: Session = Depends(get_session),
+    _=Depends(verify_token),
+):
+    """Manual adjudication of a model's billing state.
+
+    This closes the loop for billing_suspect flags (event-triggered rechecks
+    asking 请人工确认): the admin confirms the model is paid (removed from the
+    free pool, routing and probing) or still free (restored). The decision is
+    recorded with free_source="manual" and discovery will not overwrite it.
+    """
+    m = session.get(Model, model_id)
+    if not m:
+        raise HTTPException(404)
+
+    if body.decision == "paid":
+        m.is_free = False
+        m.free_type = None
+    else:
+        m.is_free = True
+        m.free_type = body.free_type or "permanent"
+    m.free_source = "manual"
+    m.consecutive_billing_failures = 0
+    session.add(m)
+
+    from services.event_recheck import cancel_pending_rechecks
+    cancel_pending_rechecks(model_id)
+
+    # Resolve every open policy_change notification for this model; the
+    # adjudication supersedes the automatic suspicion.
+    from services.notifications import resolve_notification, broadcast_notifications_updated
+    open_alerts = session.exec(
+        select(Notification)
+        .where(Notification.dedupe_key.startswith(f"policy_change:{model_id}:"))
+        .where(Notification.resolved_at == None)  # noqa: E711
+    ).all()
+    for row in open_alerts:
+        resolve_notification(session, row.dedupe_key)
+
+    session.commit()
+    session.refresh(m)
+    await broadcast_notifications_updated()
+    return _model_with_provider(session, m)
 
 
 @router.get("/{model_id}/health-history")

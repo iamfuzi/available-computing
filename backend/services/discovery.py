@@ -125,9 +125,14 @@ async def discover_channel(
 
             if raw.model_id in existing:
                 m = existing[raw.model_id]
-                m.is_free = free_info["is_free"]
-                m.free_type = free_info["free_type"]
-                m.free_source = free_info["free_source"]
+                # free_source == "manual" is an admin adjudication of the
+                # billing state (see POST /models/{id}/review). Automatic
+                # signals — whitelist, API fields, provider free sets — must
+                # not silently overwrite it; re-review via the UI instead.
+                if m.free_source != "manual":
+                    m.is_free = free_info["is_free"]
+                    m.free_type = free_info["free_type"]
+                    m.free_source = free_info["free_source"]
                 m.category = category
                 m.context_length = raw.context_length
                 # Don't overwrite observed rate limits with manual ones

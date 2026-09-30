@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 _pending_rechecks: dict[str, str] = {}
 
 
+def cancel_pending_rechecks(model_id: str) -> None:
+    """Drop scheduled recheck jobs for a model. Manual review is final: an
+    in-flight recheck tree must not re-flag a model the admin just adjudicated."""
+    _pending_rechecks.pop(model_id, None)
+    try:
+        from services.scheduler import scheduler
+        for job in scheduler.get_jobs():
+            if not job.id or not job.id.startswith("event_recheck:"):
+                continue
+            if (job.kwargs or {}).get("model_id") == model_id:
+                scheduler.remove_job(job.id)
+    except Exception:
+        # Scheduler may not be running (tests); nothing to cancel then.
+        logger.debug("No running scheduler to cancel rechecks for %s", model_id)
+
+
 def trigger_event_recheck(model_id: str, trigger_reason: str) -> str:
     """Schedule one correlated recheck batch and return its check_run_id."""
     existing = _pending_rechecks.get(model_id)

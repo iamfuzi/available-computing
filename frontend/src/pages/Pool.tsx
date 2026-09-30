@@ -314,7 +314,7 @@ export default function Pool() {
                           : '—'}
                       </td>
                       <td className="px-4 py-3 hidden md:table-cell">
-                        <FreeTypeBadge freeType={m.free_type} source={m.free_source} />
+                        <FreeTypeBadge freeType={m.free_type} source={m.free_source} isFree={m.is_free} />
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col items-start gap-1">

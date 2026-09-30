@@ -56,6 +56,8 @@ export const modelsApi = {
   get: (id: string) => api.get<ModelRow>(`/models/${id}`).then((r) => r.data),
   healthHistory: (id: string, period: '24h' | '7d' = '24h') =>
     api.get<HealthRecord[]>(`/models/${id}/health-history`, { params: { period } }).then((r) => r.data),
+  review: (id: string, decision: 'paid' | 'free', freeType?: 'permanent' | 'quota' | 'grant') =>
+    api.post<ModelRow>(`/models/${id}/review`, { decision, free_type: freeType }).then((r) => r.data),
 }
 
 export const settingsApi = {

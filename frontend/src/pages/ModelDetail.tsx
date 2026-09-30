@@ -8,6 +8,108 @@ import FreeTypeBadge from '../components/FreeTypeBadge'
 
 const TABS = ['cURL', 'Python', 'Node.js'] as const
 type Tab = typeof TABS[number]
+type FreeTypeChoice = 'permanent' | 'quota' | 'grant'
+
+const FREE_TYPE_OPTIONS: { value: FreeTypeChoice; label: string }[] = [
+  { value: 'permanent', label: '永久免费' },
+  { value: 'quota', label: '免费配额（每日/月上限）' },
+  { value: 'grant', label: '新用户赠送' },
+]
+
+const FREE_SOURCE_LABELS: Record<string, string> = {
+  manual: '人工裁定',
+  whitelist: '白名单',
+  prefix_rule: '前缀规则（Pro/LoRA 等收费家族）',
+  provider_free: '厂商整体免费',
+  api_field: 'API 字段',
+  api_free_set: '厂商免费模型列表',
+  event_recheck: '自动复检',
+  probe_restored: '探测恢复',
+}
+
+function FreeReviewCard({ model, onUpdated }: { model: ModelRow; onUpdated: (m: ModelRow) => void }) {
+  const [busy, setBusy] = useState<'paid' | 'free' | null>(null)
+  const [error, setError] = useState('')
+  const [done, setDone] = useState('')
+  const [freeType, setFreeType] = useState<FreeTypeChoice>('permanent')
+
+  const needsReview = model.is_free == null || model.free_type === 'billing_suspect'
+
+  async function submit(decision: 'paid' | 'free') {
+    setBusy(decision)
+    setError('')
+    setDone('')
+    try {
+      const updated = await modelsApi.review(model.id, decision, decision === 'free' ? freeType : undefined)
+      onUpdated(updated)
+      setDone(decision === 'paid' ? '已标记为收费模型，并移出免费池' : '已确认免费，恢复参与路由')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '操作失败')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className={`rounded-2xl p-5 space-y-3 shadow-sm border ${
+      needsReview
+        ? 'bg-orange-50 border-orange-300'
+        : 'bg-white border-gray-200'
+    }`}>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold text-gray-900">免费状态 · 人工裁定</h2>
+        <FreeTypeBadge freeType={model.free_type} source={model.free_source} isFree={model.is_free} />
+      </div>
+
+      {needsReview && (
+        <p className="text-sm text-orange-800">
+          该模型出现疑似计费信号，等待人工确认。确认为收费后将从免费池移出（不再路由、不再探测）；确认免费则恢复参与路由。裁定结果不会被自动发现覆盖。
+        </p>
+      )}
+      {!needsReview && (
+        <p className="text-sm text-gray-500">
+          如厂商计费策略与展示不符，可在此人工改判。人工裁定优先于白名单和自动发现。
+        </p>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        {model.is_free !== true && (
+          <>
+            <select
+              value={freeType}
+              onChange={(e) => setFreeType(e.target.value as FreeTypeChoice)}
+              disabled={busy !== null}
+              className="border border-gray-200 rounded-lg px-2 py-2 text-sm bg-white focus:outline-none focus:border-blue-400 disabled:opacity-50"
+            >
+              {FREE_TYPE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => submit('free')}
+              disabled={busy !== null}
+              className="bg-green-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+            >
+              {busy === 'free' ? '...' : '确认免费'}
+            </button>
+          </>
+        )}
+        {model.is_free !== false && (
+          <button
+            onClick={() => submit('paid')}
+            disabled={busy !== null}
+            className="bg-red-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
+          >
+            {busy === 'paid' ? '...' : '标记为收费'}
+          </button>
+        )}
+      </div>
+
+      {done && <p className="text-sm text-green-700">{done}</p>}
+      {error && <p className="text-sm text-red-600">{error}</p>}
+    </div>
+  )
+}
 
 function buildExample(m: ModelRow, tab: Tab): string {
   const base = m.base_url || ''
@@ -223,7 +325,7 @@ export default function ModelDetail() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <FreeTypeBadge freeType={model.free_type} source={model.free_source} />
+          <FreeTypeBadge freeType={model.free_type} source={model.free_source} isFree={model.is_free} />
           {model.free_expires_at && (
             <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
               免费至 {new Date(model.free_expires_at).toLocaleDateString()}
@@ -246,7 +348,8 @@ export default function ModelDetail() {
             )}
             {model.free_source && (
               <div className="text-gray-600">
-                <span className="text-gray-400 text-xs">免费判定</span> {model.free_source}
+                <span className="text-gray-400 text-xs">免费判定</span>{' '}
+                {FREE_SOURCE_LABELS[model.free_source] ?? model.free_source}
               </div>
             )}
           </div>
@@ -283,6 +386,9 @@ export default function ModelDetail() {
           </div>
         </div>
       </div>
+
+      {/* Manual billing adjudication */}
+      <FreeReviewCard model={model} onUpdated={setModel} />
 
       {/* Health history */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
