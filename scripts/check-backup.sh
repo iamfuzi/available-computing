@@ -38,9 +38,20 @@ chmod 600 "$ac_restore_dir/db.sqlite"
     alembic -c alembic.ini upgrade head
 )
 
-ac_integrity="$(sqlite3 "$ac_restore_dir/db.sqlite" 'PRAGMA integrity_check;')"
-ac_foreign_keys="$(sqlite3 "$ac_restore_dir/db.sqlite" 'PRAGMA foreign_key_check;')"
-ac_revision="$(sqlite3 "$ac_restore_dir/db.sqlite" 'SELECT version_num FROM alembic_version;')"
+ac_sql() {
+  # sqlite3 CLI 不一定安装（mini 主机），用 python3 标准库执行同一条 SQL
+  python3 - "$ac_restore_dir/db.sqlite" "$1" <<'PYEOF'
+import sqlite3, sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = conn.execute(sys.argv[2]).fetchall()
+print("\n".join(str(r[0]) for r in rows))
+conn.close()
+PYEOF
+}
+
+ac_integrity="$(ac_sql 'PRAGMA integrity_check;')"
+ac_foreign_keys="$(ac_sql 'PRAGMA foreign_key_check;')"
+ac_revision="$(ac_sql 'SELECT version_num FROM alembic_version;')"
 
 if [[ "$ac_integrity" != "ok" || -n "$ac_foreign_keys" ]]; then
   echo "Restore check failed." >&2
