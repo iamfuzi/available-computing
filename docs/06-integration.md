@@ -87,6 +87,20 @@ profile 的创建、字段和合并规则见 [Routing Profiles](../profiles/READ
 
 ---
 
+### 1.4 服务变更公告机制
+
+AC 的服务变更通过公告通知调用方，三个触达通道，无需人工转发：
+
+| 通道 | 位置 | 适用 |
+|---|---|---|
+| self-test 响应 | `notices` 字段（最多 3 条活跃公告） | 每次自检顺带获取 |
+| 响应头 | `X-AC-Notice: <公告id>`；`X-AC-Notice-Level`；`X-AC-Notice-Title`（URL 编码）；`X-AC-Notice-Action-Required: true` | 所有 `/v1/*` 响应，可被 SDK/网关无成本捕获；拿 id 到公开端点拉详情 |
+| 公开端点 | `GET /api/v1/auth/public/notices`（无需登录）与公开手册页 | 主动查询 |
+
+约定：`level` 为 `info`（知悉）/ `warning`（注意）/ `breaking`（破坏性）；
+`action_required: true` 表示调用方**必须评估适配**，建议对含此标记的公告
+在发布窗口内完成验证。建议调用方在监控里对 `X-AC-Notice` 头的变化告警。
+
 ## 2. 接入前自检
 
 先验证认证、策略与路由，不消耗上游推理额度。响应中的 `key_limits` 同时告诉你这把 Key 的频率约束：

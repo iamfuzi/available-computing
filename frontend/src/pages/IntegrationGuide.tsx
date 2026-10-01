@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { marked } from 'marked'
 import { publicApi } from '../api/client'
+import type { NoticeRow } from '../api/client'
 
 // 公开的接入手册页（无需登录）。第三方拿到地址 + ac_ key 后从这里
 // 自助接入：自检、auto 路由、频率限制、错误契约。内容来自后端打包的
@@ -10,12 +11,14 @@ export default function IntegrationGuide() {
   const [html, setHtml] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [notices, setNotices] = useState<NoticeRow[]>([])
 
   useEffect(() => {
     publicApi.integrationGuide()
       .then((d) => setHtml(marked.parse(d.markdown, { async: false }) as string))
       .catch(() => setError('手册加载失败，请稍后重试'))
       .finally(() => setLoading(false))
+    publicApi.notices().then(setNotices).catch(() => {})
   }, [])
 
   return (
@@ -29,7 +32,26 @@ export default function IntegrationGuide() {
           <Link to="/login" className="text-xs text-blue-600 hover:underline">管理登录 →</Link>
         </div>
       </header>
-      <main className="max-w-3xl mx-auto px-4 py-6">
+      <main className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+        {notices.slice(0, 3).map((n) => (
+          <div
+            key={n.id}
+            className={`rounded-2xl border px-4 py-3 text-sm ${
+              n.level === 'breaking'
+                ? 'border-red-200 bg-red-50 text-red-800'
+                : n.level === 'warning'
+                  ? 'border-amber-200 bg-amber-50 text-amber-800'
+                  : 'border-blue-200 bg-blue-50 text-blue-800'
+            }`}
+          >
+            <div className="font-medium">
+              {n.action_required && <span className="mr-1.5">⚠️ 需要适配</span>}
+              {n.title}
+              <span className="ml-2 text-xs opacity-60">{new Date(n.ts).toLocaleDateString()}</span>
+            </div>
+            {n.body && <p className="mt-1 text-xs leading-relaxed opacity-90 whitespace-pre-wrap">{n.body}</p>}
+          </div>
+        ))}
         {loading && <p className="text-sm text-gray-400 animate-pulse py-12 text-center">加载中...</p>}
         {error && <p className="text-sm text-red-500 py-12 text-center">{error}</p>}
         {html && (

@@ -37,6 +37,24 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         request.state.ac_request_id = request_id
         response: Response = await call_next(request)
         response.headers[REQUEST_ID_HEADER] = request_id
+        # 变更公告机器可读通道：所有响应带 X-AC-Notice（有活跃公告时），
+        # 像 GitHub 的 deprecation 头。调用方 SDK/网关可无成本捕获。
+        if request.url.path.startswith("/v1/") or request.url.path.startswith("/api/v1/auth/public"):
+            try:
+                from services.notices_center import header_notice
+                notice = header_notice()
+                if notice:
+                    # HTTP 头仅允许 latin-1：中文标题需 URL 编码；id/级别
+                    # 为 ASCII 可直放。调用方拿 id 去公开端点拉详情。
+                    import urllib.parse
+                    response.headers["X-AC-Notice"] = str(notice.get("id", ""))
+                    response.headers["X-AC-Notice-Level"] = str(notice.get("level", "info"))
+                    response.headers["X-AC-Notice-Title"] = urllib.parse.quote(
+                        str(notice.get("title", "")), safe="")
+                    if notice.get("action_required"):
+                        response.headers["X-AC-Notice-Action-Required"] = "true"
+            except Exception:
+                pass
         return response
 
 

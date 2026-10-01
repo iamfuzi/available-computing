@@ -102,3 +102,15 @@ def public_integration_guide():
     if not doc.exists():
         raise HTTPException(404, "integration guide not packaged")
     return {"markdown": doc.read_text(encoding="utf-8"), "updated_at": doc.stat().st_mtime}
+
+
+@router.get("/public/notices")
+def public_notices():
+    """第三方变更公告（无鉴权，新→旧）。
+
+    调用方约定（docs/06）：self-test 响应携带同源 notices；所有 /v1/*
+    响应带 X-AC-Notice 头（有活跃公告时）。action_required=true 表示
+    调用方必须评估适配。
+    """
+    from services.notices_center import active_notices
+    return {"notices": active_notices()}

@@ -907,6 +907,11 @@ def ac_self_test(
         }
 
     key_limits = _key_limits_payload()
+    from services.notices_center import active_notices as _active_notices
+    notices = [
+        {k: n.get(k) for k in ("id", "ts", "level", "title", "action_required")}
+        for n in _active_notices()[:3]
+    ]
     profile, profile_error = _resolve_profile(auth, body, request_id)
     if profile_error is not None:
         # _resolve_profile already built a complete JSONResponse; return it as-is.
@@ -922,6 +927,7 @@ def ac_self_test(
             "selected_model": None,
             "candidate_count": 0,
             "key_limits": key_limits,
+            "notices": notices,
         }
 
     checked: list[dict] = []
@@ -946,6 +952,7 @@ def ac_self_test(
             "candidate_count": len(candidates),
             "checked": checked,
             "key_limits": key_limits,
+            "notices": notices,
         }
 
     return {
@@ -957,6 +964,7 @@ def ac_self_test(
         "candidate_count": len(candidates),
         "checked": checked,
         "key_limits": key_limits,
+        "notices": notices,
     }
 
 

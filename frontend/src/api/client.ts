@@ -53,6 +53,25 @@ export const channelsApi = {
 export const publicApi = {
   integrationGuide: () =>
     api.get<{ markdown: string; updated_at: number }>('/auth/public/integration-guide').then((r) => r.data),
+  notices: () =>
+    api.get<{ notices: NoticeRow[] }>('/auth/public/notices').then((r) => r.data.notices),
+}
+
+export interface NoticeRow {
+  id: string
+  ts: string
+  level: 'info' | 'warning' | 'breaking'
+  title: string
+  body?: string
+  action_required?: boolean
+  expires_at?: string | null
+}
+
+export const noticesApi = {
+  list: () => api.get<{ notices: NoticeRow[] }>('/notices').then((r) => r.data.notices),
+  create: (data: { title: string; body: string; level?: string; action_required?: boolean; expires_at?: string | null }) =>
+    api.post<NoticeRow>('/notices', data).then((r) => r.data),
+  remove: (id: string) => api.delete(`/notices/${id}`),
 }
 
 export const modelsApi = {

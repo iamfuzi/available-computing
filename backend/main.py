@@ -81,6 +81,8 @@ app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"]
 app.include_router(apikeys.router, prefix="/api/v1/apikeys", tags=["apikeys"])
 app.include_router(candidates.router, prefix="/api/v1/candidates", tags=["candidates"])
 app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
+from api import notices as api_notices
+app.include_router(api_notices.router, prefix="/api/v1/notices", tags=["notices"])
 
 # WebSocket
 app.include_router(ws_router)

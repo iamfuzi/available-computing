@@ -1,6 +1,78 @@
 import { useState, useEffect } from 'react'
-import { settingsApi, apiKeysApi } from '../api/client'
+import { settingsApi, apiKeysApi, noticesApi } from '../api/client'
+import type { NoticeRow } from '../api/client'
 import type { Settings as SettingsType, ApiKeyRow, ApiKeyCreated } from '../api/client'
+
+function NoticesCard() {
+  const [notices, setNotices] = useState<NoticeRow[]>([])
+  const [title, setTitle] = useState('')
+  const [body, setBody] = useState('')
+  const [level, setLevel] = useState('info')
+  const [actionRequired, setActionRequired] = useState(false)
+  const [busy, setBusy] = useState(false)
+
+  const load = () => noticesApi.list().then(setNotices).catch(() => {})
+  useEffect(() => { load() }, [])
+
+  async function publish() {
+    if (!title.trim()) return
+    setBusy(true)
+    try {
+      await noticesApi.create({ title: title.trim(), body: body.trim(), level, action_required: actionRequired })
+      setTitle(''); setBody(''); setLevel('info'); setActionRequired(false)
+      await load()
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <section className="bg-white border border-gray-200 rounded-2xl p-5 shadow-sm space-y-3">
+      <div>
+        <h2 className="text-sm font-semibold text-gray-900">第三方变更公告</h2>
+        <p className="text-xs text-gray-400 mt-0.5">
+          发布后调用方在 self-test 响应、X-AC-Notice 响应头和公开手册页（/integration）都能看到
+        </p>
+      </div>
+      <div className="space-y-2">
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="公告标题（如：auto 路由行为变更）"
+          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400" />
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="详情（可选）：影响范围、建议动作"
+          rows={2} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400" />
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <select value={level} onChange={(e) => setLevel(e.target.value)} className="border border-gray-200 rounded-lg px-2 py-1.5">
+            <option value="info">info（知悉）</option>
+            <option value="warning">warning（注意）</option>
+            <option value="breaking">breaking（破坏性）</option>
+          </select>
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input type="checkbox" checked={actionRequired} onChange={(e) => setActionRequired(e.target.checked)} className="rounded border-gray-300" />
+            需要调用方适配
+          </label>
+          <button onClick={publish} disabled={busy || !title.trim()}
+            className="ml-auto bg-gray-900 text-white rounded-lg px-3 py-1.5 disabled:opacity-40">
+            {busy ? '发布中...' : '发布公告'}
+          </button>
+        </div>
+      </div>
+      {notices.length > 0 && (
+        <div className="divide-y divide-gray-50">
+          {notices.map((n) => (
+            <div key={n.id} className="flex items-center gap-2 py-2 text-xs">
+              <span className={`px-1.5 py-0.5 rounded font-medium ${
+                n.level === 'breaking' ? 'bg-red-50 text-red-700' :
+                n.level === 'warning' ? 'bg-amber-50 text-amber-700' : 'bg-blue-50 text-blue-700'
+              }`}>{n.level}</span>
+              {n.action_required && <span className="text-amber-600" title="需要调用方适配">⚠️</span>}
+              <span className="text-gray-700 truncate flex-1">{n.title}</span>
+              <span className="text-gray-300">{new Date(n.ts).toLocaleDateString()}</span>
+              <button onClick={async () => { await noticesApi.remove(n.id); load() }}
+                className="text-gray-300 hover:text-red-500">删除</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<SettingsType | null>(null)
@@ -343,6 +415,7 @@ export default function SettingsPage() {
       <div className="text-center text-xs text-gray-300 pt-4">
         算力池 v0.1.0 · <a href="https://github.com/iamfuzi/available-computing" target="_blank" rel="noreferrer" className="hover:text-gray-500">GitHub</a>
       </div>
+          <NoticesCard />
     </div>
   )
 }
