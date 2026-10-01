@@ -46,13 +46,14 @@ def list_models(
 
     if free_only:
         stmt = stmt.where(Model.is_free == True)
-    if healthy_only:
-        stmt = stmt.where(Model.health_status == "healthy")
     if routable_only:
         # 与实际路由口径一致（chat_candidates）：slow = 降权但可路由。
         # "健康"只是亚秒分档线，不是可用性线——两个口径曾让管理员误以为
-        # 大部分模型不参与服务（2026-09-30）。
+        # 大部分模型不参与服务（2026-09-30）。routable_only 是更宽的口径，
+        # 显式覆盖 healthy_only，避免两个开关叠加成意外的交集。
         stmt = stmt.where(Model.health_status.in_(["healthy", "slow"]))
+    elif healthy_only:
+        stmt = stmt.where(Model.health_status == "healthy")
     if hide_down:
         stmt = stmt.where(Model.health_status != "down").where(Model.health_status != "rate_limited")
     if category:
