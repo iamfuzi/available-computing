@@ -13,7 +13,7 @@ const STATUS_CONFIG: Record<string, { dot: string; label: string }> = {
 
 const STATUS_LABEL: Record<string, string> = {
   healthy: '可用',
-  slow: '不稳定',
+  slow: '响应偏慢',
   rate_limited: '限流中',
   down: '异常',
   unknown: '未验证',

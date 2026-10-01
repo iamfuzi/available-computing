@@ -146,7 +146,7 @@ export default function Pool() {
       {summary && (
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <StatCard
-            label="当前可用 / 待确认"
+            label="当前可用 / 计费待裁定"
             value={`${summary.available_model_count} / ${summary.pending_policy_change_count}`}
             onClick={() => summary.pending_policy_change_count > 0 ? navigate('/notifications') : undefined}
           />
