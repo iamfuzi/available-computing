@@ -910,7 +910,7 @@ def ac_self_test(
     from services.contract import CONTRACT_VERSION as _CONTRACT_VERSION
     from services.notices_center import active_notices as _active_notices
     notices = [
-        {k: n.get(k) for k in ("id", "ts", "level", "title", "action_required")}
+        {k: n.get(k) for k in ("id", "ts", "level", "title", "action_required", "change_type", "affected")}
         for n in _active_notices()[:3]
     ]
     profile, profile_error = _resolve_profile(auth, body, request_id)
