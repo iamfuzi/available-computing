@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from database import get_session
-from models import Model, HealthRecord, Channel, Notification
+from models import RequestLog, Model, HealthRecord, Channel, Notification
 from api.auth import verify_token
 
 router = APIRouter()
@@ -166,6 +166,49 @@ async def review_model(
     session.refresh(m)
     await broadcast_notifications_updated()
     return _model_with_provider(session, m)
+
+
+@router.get("/{model_id}/request-logs")
+def get_model_request_logs(
+    model_id: str,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+    _=Depends(verify_token),
+):
+    """Recent terminal proxy requests served (or attempted) by this model.
+
+    Post-mortem companion to health history: shows the caller-facing view
+    (requested model incl. auto:*, outcome, error codes, failover chain)
+    that used to live only in docker logs lost on every rebuild.
+    """
+    from sqlalchemy import or_, and_
+
+    m = session.get(Model, model_id)
+    if not m:
+        raise HTTPException(404)
+    ch = session.get(Channel, m.channel_id)
+    conditions = [RequestLog.selected_model == m.model_id]
+    if ch:
+        conditions.append(
+            and_(RequestLog.selected_model == m.model_id, RequestLog.provider == ch.provider_type)
+        )
+    conditions.append(RequestLog.requested_model == m.model_id)
+    rows = session.exec(
+        select(RequestLog)
+        .where(or_(*conditions))
+        .order_by(RequestLog.ts.desc())
+        .limit(min(max(limit, 1), 100))
+    ).all()
+    return [
+        {
+            "ts": r.ts.isoformat(), "request_id": r.request_id,
+            "category": r.category, "requested_model": r.requested_model,
+            "outcome": r.outcome, "status_code": r.status_code,
+            "error_code": r.error_code, "latency_ms": r.latency_ms,
+            "attempted": r.attempted,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/{model_id}/health-history")

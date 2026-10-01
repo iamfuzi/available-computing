@@ -56,6 +56,8 @@ export const modelsApi = {
   get: (id: string) => api.get<ModelRow>(`/models/${id}`).then((r) => r.data),
   healthHistory: (id: string, period: '24h' | '7d' = '24h') =>
     api.get<HealthRecord[]>(`/models/${id}/health-history`, { params: { period } }).then((r) => r.data),
+  requestLogs: (id: string, limit = 15) =>
+    api.get<RequestLogRow[]>(`/models/${id}/request-logs`, { params: { limit } }).then((r) => r.data),
   review: (id: string, decision: 'paid' | 'free', freeType?: 'permanent' | 'quota' | 'grant') =>
     api.post<ModelRow>(`/models/${id}/review`, { decision, free_type: freeType }).then((r) => r.data),
 }
@@ -255,6 +257,18 @@ export interface ModelListParams {
   include_rate_limited?: boolean
   q?: string
   sort_by?: 'smart' | 'fast'
+}
+
+export interface RequestLogRow {
+  ts: string
+  request_id: string | null
+  category: string
+  requested_model: string | null
+  outcome: string
+  status_code: number | null
+  error_code: string | null
+  latency_ms: number | null
+  attempted: string | null
 }
 
 export interface HealthRecord {

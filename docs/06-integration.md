@@ -260,6 +260,13 @@ curl "$AC_BASE_URL/models?category=all" -H "Authorization: Bearer $AC_API_KEY"
 
 `auto:*` 只从符合以下条件的模型中选择：明确免费、渠道有效、健康为 `healthy` 或 `slow`、不在 429 冷却、能力匹配，并满足代理 Key 和请求策略。
 
+**`auto:*` 的正文服务承诺**（2026-09-30 z1 空正文事件后明确）：
+
+- 返回的 `message.content` **可直接使用**：`auto:text` / `auto:fast` / `auto:smart` 不会路由到把思考内容内联在 content 里的模型（如 `glm-z1-flash` 的 `<think>` 前缀）。思考走独立字段（`reasoning` / `reasoning_content`）的模型可以入选，其 content 同样干净。
+- 需要这类内联思考模型时，请**显式指定模型名**调用——它们仍可按名使用，只是不参与 auto 路由。
+- 调用方仍应自行设置合理的 `max_tokens`：思考型模型（即使独立字段）的思考与正文共享输出预算，长任务建议 ≥2048。
+- 防御性建议：把"finish_reason=length 且正文为空"识别为可重试错误，而非格式无效。
+
 Embedding 与 Rerank 当前要求填写具体模型 ID；Image 支持具体模型或 `auto:image`。
 
 ### 4.3 请求级路由策略

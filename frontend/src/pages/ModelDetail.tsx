@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { modelsApi } from '../api/client'
-import type { ModelRow, HealthRecord } from '../api/client'
+import type { ModelRow, HealthRecord, RequestLogRow } from '../api/client'
 import HealthBadge from '../components/HealthBadge'
 import FreshnessBadge from '../components/FreshnessBadge'
 import FreeTypeBadge from '../components/FreeTypeBadge'
@@ -258,6 +258,7 @@ export default function ModelDetail() {
   const navigate = useNavigate()
   const [model, setModel] = useState<ModelRow | null>(null)
   const [history, setHistory] = useState<HealthRecord[]>([])
+  const [reqLogs, setReqLogs] = useState<RequestLogRow[]>([])
   const [tab, setTab] = useState<Tab>('cURL')
   const [copied, setCopied] = useState(false)
   const [period, setPeriod] = useState<'24h' | '7d'>('24h')
@@ -269,9 +270,11 @@ export default function ModelDetail() {
     Promise.all([
       modelsApi.get(id),
       modelsApi.healthHistory(id, period),
-    ]).then(([m, h]) => {
+      modelsApi.requestLogs(id).catch(() => [] as RequestLogRow[]),
+    ]).then(([m, h, rl]) => {
       setModel(m)
       setHistory(h)
+      setReqLogs(rl)
     }).catch(() => {
       // model stays null, will show blank state
     }).finally(() => setLoading(false))
@@ -415,7 +418,7 @@ export default function ModelDetail() {
             {history.slice(-80).map((r, i) => (
               <div
                 key={i}
-                title={`${new Date(r.checked_at).toLocaleTimeString()}: ${r.status}${r.response_ms ? ` ${r.response_ms}ms` : ''}`}
+                title={`${new Date(r.checked_at).toLocaleString()}: ${r.status}${r.failure_reason ? `（${r.failure_reason}）` : ''}${r.response_ms ? ` ${r.response_ms}ms` : ''}${r.is_passive ? ' · 真实流量' : ' · 探测'}`}
                 className="flex-1 rounded-sm transition-opacity hover:opacity-80"
                 style={{
                   backgroundColor: STATUS_COLOR[r.status] ?? STATUS_COLOR.unknown,
@@ -427,15 +430,79 @@ export default function ModelDetail() {
             ))}
           </div>
         )}
-        {history.length > 0 && (
-          <div className="flex gap-4 text-xs text-gray-400">
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /> 健康</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500" /> 慢</span>
-            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> 异常</span>
-            <span className="ml-auto">{history.length} 条记录</span>
-          </div>
-        )}
+        {history.length > 0 && (() => {
+          const reasons = history.filter((r) => r.failure_reason).reduce<Record<string, number>>((acc, r) => {
+            acc[r.failure_reason!] = (acc[r.failure_reason!] || 0) + 1
+            return acc
+          }, {})
+          const reasonEntries = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 4)
+          const passive = history.filter((r) => r.is_passive).length
+          return (
+            <div className="space-y-1.5">
+              <div className="flex gap-4 text-xs text-gray-400">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /> 健康</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500" /> 响应偏慢</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> 异常</span>
+                <span className="ml-auto">{history.length} 条 · 真实流量 {passive} · 探测 {history.length - passive}</span>
+              </div>
+              {reasonEntries.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 text-xs text-gray-500">
+                  <span className="text-gray-400">失败归因：</span>
+                  {reasonEntries.map(([reason, n]) => (
+                    <span key={reason} className="bg-gray-100 rounded-full px-2 py-0.5" title="悬停健康历史柱条可见每次记录的归因">
+                      {reason} ×{n}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
       </div>
+
+      {/* Recent terminal requests */}
+      {reqLogs.length > 0 && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-gray-900">最近请求</h2>
+            <span className="text-xs text-gray-400">保留 7 天 · 重建容器不丢</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-gray-400">
+                <tr>
+                  <th className="text-left font-medium py-1.5">时间</th>
+                  <th className="text-left font-medium py-1.5">请求模型</th>
+                  <th className="text-left font-medium py-1.5">结果</th>
+                  <th className="text-left font-medium py-1.5">延迟</th>
+                  <th className="text-left font-medium py-1.5 hidden sm:table-cell">换道链</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {reqLogs.map((r, i) => (
+                  <tr key={i}>
+                    <td className="py-1.5 text-gray-500 whitespace-nowrap">{new Date(r.ts).toLocaleString()}</td>
+                    <td className="py-1.5 font-mono text-gray-700">{r.requested_model}</td>
+                    <td className="py-1.5">
+                      {r.outcome === 'success' ? (
+                        <span className="text-green-600">成功 {r.status_code}</span>
+                      ) : (
+                        <span className="text-red-500" title={r.error_code || ''}>
+                          失败 {r.status_code}{r.error_code ? ` · ${r.error_code}` : ''}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1.5 text-gray-500">{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</td>
+                    <td className="py-1.5 text-gray-400 hidden sm:table-cell max-w-[220px] truncate" title={r.attempted || ''}>
+                      {r.attempted || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Quick try */}
       <QuickTry modelId={model.model_id} providerName={model.provider_name || ''} />
