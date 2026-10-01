@@ -85,7 +85,7 @@ profile 的创建、字段和合并规则见 [Routing Profiles](../profiles/READ
 
 ## 2. 接入前自检
 
-先验证认证、策略与路由，不消耗上游推理额度：
+先验证认证、策略与路由，不消耗上游推理额度。响应中的 `key_limits` 同时告诉你这把 Key 的频率约束：
 
 ```bash
 curl "$AC_BASE_URL/ac/self-test" \
@@ -93,6 +93,21 @@ curl "$AC_BASE_URL/ac/self-test" \
   -H "Content-Type: application/json" \
   -d '{"model":"auto:text"}'
 ```
+
+```json
+{
+  "ok": true,
+  "selected_model": "...",
+  "key_limits": {
+    "key_rpm": null,          // Key 级每分钟上限（null=未单独设置）
+    "key_rpd": null,          // Key 级每日上限（null=未单独设置）
+    "platform_default_rpm": 120,  // 未单独设置时适用的平台默认值
+    "today_requests": 158     // 本 Key 今日累计请求数
+  }
+}
+```
+
+**频率限制的生效规则**：单 Key 默认 `platform_default_rpm`（每分钟滑窗，按 Key 计，不按 IP）；若管理者为 Key 配置了 `key_rpm`/`key_rpd` 则以更严者为准。超过后返回 `429` 并附 `Retry-After`（秒）。此外单模型/单渠道还有本地预算保护与上游厂商限流，同样表现为 `429`——统一处理方式：读 `Retry-After` 退避重试，或直接换 `auto:*` 让 AC 内部换道。
 
 使用命名 profile 的应用必须带上同一个 profile 自检：
 

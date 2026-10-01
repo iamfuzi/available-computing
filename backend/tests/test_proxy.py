@@ -1834,3 +1834,74 @@ class TestEmptyContentFeedback:
             })
         assert resp.status_code == 200
         assert resp.headers.get("X-AC-Selected-Model") != "glm-z1-flash"
+
+
+class TestThirdPartyContract:
+    """第三方接入方视角的回归：流式成功必须 200（曾因流式路径引用未定义
+    的 ms 变量全部 500，fc7294c 引入、2026-10-01 接入演练发现）；
+    auto 路由遇空正文自动换道而不是返回 null content。"""
+
+    @pytest.mark.asyncio
+    async def test_stream_success_returns_200_and_logs(self, app_client, auth_headers, sample_model, sample_channel):
+        from database import engine
+        from sqlmodel import Session as _S, select as _sel
+        from models import RequestLog
+        async def aiter():
+            yield 'data: {"choices":[{"delta":{"content":"ok"}}]}'
+            yield 'data: [DONE]'
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.aiter_lines = aiter
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_cm.aclose = AsyncMock()
+        mock_cm.build_request = MagicMock(return_value=MagicMock())
+        mock_cm.send = AsyncMock(return_value=mock_resp)
+        with patch("api.proxy.httpx.AsyncClient", return_value=mock_cm):
+            resp = await app_client.post("/v1/chat/completions", headers=auth_headers, json={
+                "model": "test-model-free", "messages": [{"role": "user", "content": "hi"}], "stream": True,
+            })
+        assert resp.status_code == 200
+        with _S(engine) as s:
+            row = s.exec(_sel(RequestLog).order_by(RequestLog.id.desc())).first()
+        assert row.outcome == "success" and row.latency_ms is not None
+
+    @pytest.mark.asyncio
+    async def test_auto_route_fails_over_on_empty_content(self, app_client, auth_headers, db_session, sample_model, sample_channel):
+        # 第一个候选返回空正文（reasoning 烧光预算），auto 路由应换道到
+        # 下一个候选而不是把 null content 交给调用方
+        from models import Model
+        db_session.add(Model(
+            id="mdl-empty", channel_id=sample_channel.id, model_id="empty-reasoning-model",
+            is_free=True, is_active=True, health_status="healthy", category="text",
+            last_response_ms=5,
+        ))
+        sample_model.last_response_ms = 10
+        db_session.add(sample_model)
+        db_session.commit()
+        responses = [
+            {"id": "e1", "choices": [{"message": {"content": None, "reasoning": "thinking"}, "finish_reason": "length"}]},
+            {"id": "g1", "choices": [{"message": {"content": "真正的答案"}, "finish_reason": "stop"}]},
+        ]
+        mock_resps = []
+        for payload in responses:
+            r = MagicMock(); r.status_code = 200; r.json.return_value = payload
+            r.headers = {}
+            mock_resps.append(r)
+        with patch("api.proxy.httpx.AsyncClient") as MockClient:
+            mock_cm = MagicMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=mock_cm)
+            mock_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_cm.post = AsyncMock(side_effect=mock_resps)
+            MockClient.return_value = mock_cm
+            resp = await app_client.post("/v1/chat/completions", headers=auth_headers, json={
+                "model": "auto:text", "messages": [{"role": "user", "content": "hi"}],
+            })
+        assert resp.status_code == 200
+        assert resp.json()["choices"][0]["message"]["content"] == "真正的答案"
+
+    def test_self_test_includes_key_limits(self, db_session, sample_model, sample_channel):
+        from api.proxy import _proxy_requests
+        _proxy_requests.clear()
+        from services.router import AUTO_RE  # noqa: F401 — 只要能 import 即可

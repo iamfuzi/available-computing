@@ -19,6 +19,7 @@ COPY providers/ ./providers/
 COPY profiles/ ./profiles/
 COPY --from=frontend-builder /frontend/dist ./static
 
+ENV PYTHONUNBUFFERED=1
 ENV DATA_DIR=/app/data
 ENV WHITELIST_PATH=/app/whitelist/providers.yaml
 ENV PROVIDERS_PATH=/app/providers

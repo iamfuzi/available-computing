@@ -884,6 +884,29 @@ def ac_self_test(
     """
     route = (body.model if body else "auto:text")
     request_id = get_request_id(request)
+
+    def _key_limits_payload() -> dict:
+        # Third parties have no other place to SEE the limits that apply to
+        # their key — surface them here alongside the pre-flight result.
+        from models import KeyUsageDay
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = 0
+        if auth is not None:
+            rows = session.exec(
+                select(KeyUsageDay)
+                .where(KeyUsageDay.day == day)
+                .where(KeyUsageDay.api_key_id == auth.id)
+            ).all()
+            today = sum(r.count for r in rows)
+        return {
+            "key_rpm": getattr(auth, "rate_limit_rpm", None) if auth else None,
+            "key_rpd": getattr(auth, "rate_limit_rpd", None) if auth else None,
+            "platform_default_rpm": PROXY_API_KEY_RATE_LIMIT,
+            "today_requests": today,
+            "note": "key_rpm/key_rpd 为空表示仅受平台默认限流；超限返回 429 并附 Retry-After",
+        }
+
+    key_limits = _key_limits_payload()
     profile, profile_error = _resolve_profile(auth, body, request_id)
     if profile_error is not None:
         # _resolve_profile already built a complete JSONResponse; return it as-is.
@@ -898,6 +921,7 @@ def ac_self_test(
             "message": error,
             "selected_model": None,
             "candidate_count": 0,
+            "key_limits": key_limits,
         }
 
     checked: list[dict] = []
@@ -921,6 +945,7 @@ def ac_self_test(
             "selected_model": model.model_id,
             "candidate_count": len(candidates),
             "checked": checked,
+            "key_limits": key_limits,
         }
 
     return {
@@ -931,6 +956,7 @@ def ac_self_test(
         "selected_model": None,
         "candidate_count": len(candidates),
         "checked": checked,
+        "key_limits": key_limits,
     }
 
 
@@ -1198,19 +1224,20 @@ async def chat_completions(
                 continue
 
             if response.status_code == 200:
+                _stream_ms = int((time.monotonic() - start) * 1000)
                 logger.info(
                     "upstream ok request_id=%s provider=%s model=%s status=200 stream=true ms=%s attempt=%d",
                     request_id, channel.provider_type, model.model_id,
-                    int((time.monotonic() - start) * 1000), upstream_attempts_made,
+                    _stream_ms, upstream_attempts_made,
                 )
-            record_usage(_usage_key_id, "chat", "success")
-            _log_proxy_request(
-                category="chat", request_id=request_id, api_key_id=_usage_key_id,
-                requested_model=original_model, selected_model=model.model_id,
-                provider=channel.provider_type, outcome="success", status_code=200,
-                latency_ms=ms, attempted=attempted,
-            )
-            return StreamingResponse(
+                record_usage(_usage_key_id, "chat", "success")
+                _log_proxy_request(
+                    category="chat", request_id=request_id, api_key_id=_usage_key_id,
+                    requested_model=original_model, selected_model=model.model_id,
+                    provider=channel.provider_type, outcome="success", status_code=200,
+                    latency_ms=_stream_ms, attempted=attempted,
+                )
+                return StreamingResponse(
                     _proxy_stream(response, client, model.id, channel.id, key, slot_key),
                     media_type="text/event-stream",
                     headers={
@@ -1324,6 +1351,27 @@ async def chat_completions(
                 not _content_text.strip()
                 and (_has_reasoning or _choice.get("finish_reason") == "length")
             )
+            if _empty_body and _AUTO_RE.match(original_model or ""):
+                # auto:* promises usable content. A 200 whose body was eaten
+                # by reasoning is a failed attempt for auto routes — fall
+                # through to the next candidate instead of handing the caller
+                # a null content. Concrete model ids keep faithful passthrough
+                # (the caller chose that model; truncation is their setting).
+                await record_passive_health(model.id, ms, "empty_content", channel.id, key)
+                record_usage(_usage_key_id, "chat", "fail")
+                _log_proxy_request(
+                    category="chat", request_id=request_id, api_key_id=_usage_key_id,
+                    requested_model=original_model, selected_model=model.model_id,
+                    provider=channel.provider_type, outcome="fail", status_code=200,
+                    error_code="empty_content", latency_ms=ms, attempted=attempted,
+                )
+                logger.warning(
+                    "upstream empty-content failover request_id=%s provider=%s model=%s ms=%s",
+                    request_id, channel.provider_type, model.model_id, ms,
+                )
+                last_upstream_status = 200
+                last_failure_kind = "empty_content"
+                continue
             await record_passive_health(
                 model.id, ms, "empty_content" if _empty_body else None, channel.id, key
             )
@@ -1437,6 +1485,16 @@ async def chat_completions(
             "rate_limited",
             "all_candidates_rate_limited",
             retry_after=last_rate_retry_after,
+            attempted_models=attempted,
+            route=original_model,
+            request_id=request_id,
+        )
+    if last_failure_kind == "empty_content":
+        return _make_ac_error(
+            502,
+            "All candidates returned empty content — reasoning consumed the output budget; raise max_tokens",
+            "upstream_error",
+            "all_candidates_empty_content",
             attempted_models=attempted,
             route=original_model,
             request_id=request_id,
