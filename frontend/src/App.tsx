@@ -6,6 +6,7 @@ import ModelDetail from './pages/ModelDetail'
 import Settings from './pages/Settings'
 import ApiDocs from './pages/ApiDocs'
 import Login from './pages/Login'
+import IntegrationGuide from './pages/IntegrationGuide'
 import Candidates from './pages/Candidates'
 import Notifications from './pages/Notifications'
 import { notificationsApi } from './api/client'
@@ -113,6 +114,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
+        <Route path="/integration" element={<IntegrationGuide />} />
         <Route path="/" element={<RequireAuth><Layout><Pool /></Layout></RequireAuth>} />
         <Route path="/channels" element={<RequireAuth><Layout><Channels /></Layout></RequireAuth>} />
         <Route path="/candidates" element={<RequireAuth><Layout><Candidates /></Layout></RequireAuth>} />

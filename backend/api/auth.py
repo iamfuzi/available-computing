@@ -88,3 +88,17 @@ def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Wrong password")
     _login_attempts.pop(ip, None)
     return {"token": create_token()}
+
+
+@router.get("/public/integration-guide")
+def public_integration_guide():
+    """无需登录的接入手册（docs/06-integration.md 原文）。
+
+    第三方拿到地址和 ac_ key 即可自助接入：手册覆盖自检、auto 路由、
+    频率限制、错误契约。挂在 /integration 前端路由下渲染。
+    """
+    from pathlib import Path
+    doc = Path(__file__).resolve().parent.parent / "docs" / "06-integration.md"
+    if not doc.exists():
+        raise HTTPException(404, "integration guide not packaged")
+    return {"markdown": doc.read_text(encoding="utf-8"), "updated_at": doc.stat().st_mtime}

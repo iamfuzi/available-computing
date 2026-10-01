@@ -85,7 +85,35 @@ def list_api_keys(
     session: Session = Depends(get_session),
     _=Depends(verify_token),
 ):
+    """使用方清单：每把 Key 的策略 + 真实用量（今日/近 7 天，来自
+    keyusageday 聚合）。用过就带着记录留在列表里，便于回答"谁在调用
+    AC、调了多少、健康度如何"。"""
+    from datetime import datetime, timedelta, timezone as _tz
+    from models import KeyUsageDay
+
     keys = session.exec(select(ApiKey).order_by(ApiKey.created_at.desc())).all()
+    now = datetime.now(_tz.utc)
+    day_today = now.strftime("%Y-%m-%d")
+    since7 = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    usage_rows = session.exec(
+        select(KeyUsageDay).where(KeyUsageDay.day >= since7)
+    ).all()
+
+    usage_by_key: dict = {}
+    for row in usage_rows:
+        agg = usage_by_key.setdefault(row.api_key_id, {
+            "today_total": 0, "today_success": 0,
+            "total_7d": 0, "success_7d": 0, "categories": set(),
+        })
+        agg["categories"].add(row.category)
+        if row.day == day_today:
+            agg["today_total"] += row.count
+            if row.outcome == "success":
+                agg["today_success"] += row.count
+        agg["total_7d"] += row.count
+        if row.outcome == "success":
+            agg["success_7d"] += row.count
+
     result = []
     for k in keys:
         raw = ""
@@ -94,6 +122,22 @@ def list_api_keys(
                 raw = _decrypt_key(k.key_encrypted, session)
             except Exception:
                 raw = ""
+        agg = usage_by_key.get(k.id)
+        usage = None
+        if agg:
+            usage = {
+                "today_total": agg["today_total"],
+                "today_success": agg["today_success"],
+                "total_7d": agg["total_7d"],
+                "success_rate_7d": (
+                    round(agg["success_7d"] / agg["total_7d"], 4)
+                    if agg["total_7d"] else None
+                ),
+                "categories": sorted(agg["categories"]),
+                "ever_used": True,
+            }
+        else:
+            usage = {"ever_used": False}
         result.append({
             "id": k.id,
             "name": k.name,
@@ -102,6 +146,7 @@ def list_api_keys(
             "is_active": k.is_active,
             "created_at": k.created_at.isoformat(),
             "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+            "usage": usage,
             **_policy_dict(k),
         })
     return result

@@ -50,6 +50,11 @@ export const channelsApi = {
   probe: (id: string) => api.post(`/channels/${id}/probe`),
 }
 
+export const publicApi = {
+  integrationGuide: () =>
+    api.get<{ markdown: string; updated_at: number }>('/auth/public/integration-guide').then((r) => r.data),
+}
+
 export const modelsApi = {
   list: (params?: ModelListParams, signal?: AbortSignal) =>
     api.get<ModelRow[]>('/models', { params, signal }).then((r) => r.data),
@@ -293,6 +298,15 @@ export interface Settings {
   whitelist_version: string
 }
 
+export interface ApiKeyUsage {
+  ever_used: boolean
+  today_total?: number
+  today_success?: number
+  total_7d?: number
+  success_rate_7d?: number | null
+  categories?: string[]
+}
+
 export interface ApiKeyRow {
   id: string
   name: string
@@ -301,6 +315,7 @@ export interface ApiKeyRow {
   is_active: boolean
   created_at: string
   last_used_at: string | null
+  usage: ApiKeyUsage
   provider_whitelist: string[]
   provider_blacklist: string[]
   rate_limit: { rpm: number | null; rpd: number | null }

@@ -191,6 +191,25 @@ export default function SettingsPage() {
                     )}
                     <span className="text-xs text-gray-300">创建于 {fmtDate(k.created_at)}</span>
                   </div>
+                  {k.usage && (
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[10px] text-gray-500">
+                      {k.usage.ever_used ? (
+                        <>
+                          <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded" title="今日调用（成功/总数）">今日 {k.usage.today_success ?? 0}/{k.usage.today_total ?? 0}</span>
+                          <span className="bg-gray-50 px-1.5 py-0.5 rounded" title="近 7 天调用">7 天 {k.usage.total_7d}</span>
+                          {k.usage.success_rate_7d != null && (
+                            <span className="bg-gray-50 px-1.5 py-0.5 rounded" title="近 7 天成功率">成功率 {(k.usage.success_rate_7d * 100).toFixed(1)}%</span>
+                          )}
+                          {(k.usage.categories?.length ?? 0) > 0 && (
+                            <span className="bg-blue-50 px-1.5 py-0.5 rounded" title="使用过的能力类别">{k.usage.categories!.join('/')}</span>
+                          )}
+                          {k.last_used_at && <span className="text-gray-300">最近使用 {fmtDate(k.last_used_at)}</span>}
+                        </>
+                      ) : (
+                        <span className="bg-gray-50 text-gray-400 px-1.5 py-0.5 rounded">从未使用</span>
+                      )}
+                    </div>
+                  )}
                   {(k.provider_whitelist.length > 0 || k.provider_blacklist.length > 0 || k.rate_limit.rpm || k.rate_limit.rpd || k.default_routing_policy.min_context) && (
                     <div className="flex flex-wrap gap-1 mt-1.5 text-[10px] text-gray-500">
                       {k.provider_whitelist.length > 0 && <span className="bg-blue-50 px-1.5 py-0.5 rounded">仅 {k.provider_whitelist.join(', ')}</span>}

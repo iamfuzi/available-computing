@@ -17,6 +17,7 @@ COPY backend/ ./
 COPY whitelist/ ./whitelist/
 COPY providers/ ./providers/
 COPY profiles/ ./profiles/
+COPY docs/ ./docs/
 COPY --from=frontend-builder /frontend/dist ./static
 
 ENV PYTHONUNBUFFERED=1

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import { authApi } from '../api/client'
 
 export default function Login() {
@@ -53,6 +53,9 @@ export default function Login() {
 
         <p className="text-center text-xs text-gray-300">
           自托管 · Key 本地加密 · 不上云
+        </p>
+        <p className="text-center text-xs text-gray-400 mt-2">
+          第三方接入请看 <Link to="/integration" className="text-blue-600 hover:underline">接入手册</Link>（无需登录）
         </p>
       </form>
     </div>
