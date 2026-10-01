@@ -87,19 +87,31 @@ profile 的创建、字段和合并规则见 [Routing Profiles](../profiles/READ
 
 ---
 
-### 1.4 服务变更公告机制
+### 1.4 服务变更公告与契约（程序如何感知和适配）
 
-AC 的服务变更通过公告通知调用方，三个触达通道，无需人工转发：
+纯文本公告程序读不懂。AC 提供两层机制，适配判断留给预先约定的手册和人：
 
-| 通道 | 位置 | 适用 |
-|---|---|---|
-| self-test 响应 | `notices` 字段（最多 3 条活跃公告） | 每次自检顺带获取 |
-| 响应头 | `X-AC-Notice: <公告id>`；`X-AC-Notice-Level`；`X-AC-Notice-Title`（URL 编码）；`X-AC-Notice-Action-Required: true` | 所有 `/v1/*` 响应，可被 SDK/网关无成本捕获；拿 id 到公开端点拉详情 |
-| 公开端点 | `GET /api/v1/auth/public/notices`（无需登录）与公开手册页 | 主动查询 |
+**第一层：机器契约（确定性信号）**
 
-约定：`level` 为 `info`（知悉）/ `warning`（注意）/ `breaking`（破坏性）；
-`action_required: true` 表示调用方**必须评估适配**，建议对含此标记的公告
-在发布窗口内完成验证。建议调用方在监控里对 `X-AC-Notice` 头的变化告警。
+- `GET /api/v1/auth/public/contract`（无鉴权）返回机器可读契约：`contract_version`（单调递增）、**错误码语义表**（每个码的 `retryable` 与 `recommended_action` 枚举）、auto 路由承诺、限额默认值
+- self-test 响应同时携带 `contract_version`
+- **约定**：调用方钉住自己验证过的 `contract_version`；发现版本变化（自检或轮询）即触发自己的升级流程——报警、跑集成自检、或人工确认。**不需要理解变化内容，只需要知道"契约变了，走升级流程"**
+
+**第二层：结构化公告（变化的具体内容）**
+
+公告除给人看的标题/正文外，带机器可判字段：`change_type`（枚举）+ `affected`（影响清单）。程序按 `change_type` 查下表执行预约定动作：
+
+| change_type | 程序的确定性动作 |
+|---|---|
+| `error_code_change` | 拉取契约错误码表，对照自己的错误处理分支；未知码按 `retryable` 兜底 |
+| `behavior_change` | 用固定用例跑一遍集成自检；结果异常则人工介入 |
+| `deprecation` | 告警并排期迁移（affected 列出将下线的对象） |
+| `maintenance` | 维护窗口内暂停调度或入队（affected 含时间） |
+| `new_endpoint` | 可选接入，无动作要求 |
+| `limit_change` | 按新限额校准本地节流参数 |
+| `other` | 告警人工阅读 |
+
+公告触达通道：self-test 响应 `notices` 字段（含 change_type）、`X-AC-Notice*` 响应头族（id/级别/URL 编码标题/action_required）、`GET /api/v1/auth/public/notices`、公开手册页。建议对 `X-AC-Notice-Action-Required: true` 和 `contract_version` 变化设监控告警。
 
 ## 2. 接入前自检
 

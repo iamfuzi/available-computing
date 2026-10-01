@@ -65,11 +65,13 @@ export interface NoticeRow {
   body?: string
   action_required?: boolean
   expires_at?: string | null
+  change_type?: string
+  affected?: string[]
 }
 
 export const noticesApi = {
   list: () => api.get<{ notices: NoticeRow[] }>('/notices').then((r) => r.data.notices),
-  create: (data: { title: string; body: string; level?: string; action_required?: boolean; expires_at?: string | null }) =>
+  create: (data: { title: string; body: string; level?: string; action_required?: boolean; expires_at?: string | null; change_type?: string | null; affected?: string[] | null }) =>
     api.post<NoticeRow>('/notices', data).then((r) => r.data),
   remove: (id: string) => api.delete(`/notices/${id}`),
 }

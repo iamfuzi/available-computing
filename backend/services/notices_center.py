@@ -94,10 +94,15 @@ def active_notices(use_cache: bool = True) -> list[dict]:
 def create_notice(
     title: str, body: str, level: str = "info",
     action_required: bool = False, expires_at: str | None = None,
+    change_type: str | None = None, affected: list[str] | None = None,
     session: Session | None = None,
 ) -> dict:
     if level not in ("info", "warning", "breaking"):
         raise ValueError("level must be info/warning/breaking")
+    if change_type:
+        from services.contract import CHANGE_TYPES
+        if change_type not in CHANGE_TYPES:
+            raise ValueError(f"change_type must be one of {CHANGE_TYPES}")
     notice = {
         "id": f"n{_now().strftime('%Y%m%d')}-{uuid4().hex[:6]}",
         "ts": _now().isoformat(),
@@ -106,6 +111,12 @@ def create_notice(
         "body": body,
         "action_required": action_required,
     }
+    # 机器可判字段：程序 switch change_type + 读取 affected，
+    # 不解析自然语言（docs/06 处置手册）
+    if change_type:
+        notice["change_type"] = change_type
+    if affected:
+        notice["affected"] = affected
     if expires_at:
         notice["expires_at"] = expires_at
     own = session is None

@@ -9,6 +9,8 @@ function NoticesCard() {
   const [body, setBody] = useState('')
   const [level, setLevel] = useState('info')
   const [actionRequired, setActionRequired] = useState(false)
+  const [changeType, setChangeType] = useState('')
+  const [affected, setAffected] = useState('')
   const [busy, setBusy] = useState(false)
 
   const load = () => noticesApi.list().then(setNotices).catch(() => {})
@@ -18,8 +20,12 @@ function NoticesCard() {
     if (!title.trim()) return
     setBusy(true)
     try {
-      await noticesApi.create({ title: title.trim(), body: body.trim(), level, action_required: actionRequired })
-      setTitle(''); setBody(''); setLevel('info'); setActionRequired(false)
+      await noticesApi.create({
+        title: title.trim(), body: body.trim(), level, action_required: actionRequired,
+        change_type: changeType || null,
+        affected: affected.trim() ? affected.split(/[,，\s]+/).filter(Boolean) : null,
+      })
+      setTitle(''); setBody(''); setLevel('info'); setActionRequired(false); setChangeType(''); setAffected('')
       await load()
     } finally { setBusy(false) }
   }
@@ -43,6 +49,17 @@ function NoticesCard() {
             <option value="warning">warning（注意）</option>
             <option value="breaking">breaking（破坏性）</option>
           </select>
+          <select value={changeType} onChange={(e) => setChangeType(e.target.value)} className="border border-gray-200 rounded-lg px-2 py-1.5" title="机器可判类型：程序按此查处置手册，不解析正文">
+            <option value="">类型（可选，给程序）</option>
+            <option value="error_code_change">error_code_change</option>
+            <option value="behavior_change">behavior_change</option>
+            <option value="deprecation">deprecation</option>
+            <option value="maintenance">maintenance</option>
+            <option value="new_endpoint">new_endpoint</option>
+            <option value="limit_change">limit_change</option>
+          </select>
+          <input value={affected} onChange={(e) => setAffected(e.target.value)} placeholder="影响清单（逗号分隔，如 /v1/chat, all_candidates_empty_content）"
+            className="flex-1 min-w-40 border border-gray-200 rounded-lg px-2 py-1.5" />
           <label className="flex items-center gap-1.5 cursor-pointer select-none">
             <input type="checkbox" checked={actionRequired} onChange={(e) => setActionRequired(e.target.checked)} className="rounded border-gray-300" />
             需要调用方适配

@@ -114,3 +114,14 @@ def public_notices():
     """
     from services.notices_center import active_notices
     return {"notices": active_notices()}
+
+
+@router.get("/public/contract")
+def public_contract():
+    """服务契约（无鉴权，机器可读）。
+
+    调用方钉住验证过的 contract_version；版本变化即触发自己的升级
+    流程。错误码语义表是适配的唯一权威来源。
+    """
+    from services.contract import contract_payload
+    return contract_payload()

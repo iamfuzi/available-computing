@@ -71,3 +71,34 @@ class TestNoticesApi:
         resp = await app_client.post("/v1/ac/self-test", headers=auth_headers, json={})
         assert resp.status_code == 200
         assert any(n["title"] == "自检可见" for n in resp.json().get("notices", []))
+
+
+class TestContract:
+    @pytest.mark.asyncio
+    async def test_public_contract_no_auth(self, app_client):
+        resp = await app_client.get("/api/v1/auth/public/contract")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["contract_version"] >= 1
+        assert "all_candidates_empty_content" in body["error_codes"]
+        assert body["error_codes"]["model_not_found"]["retryable"] is False
+        assert body["error_codes"]["all_candidates_empty_content"]["recommended_action"] == "raise_budget"
+
+    @pytest.mark.asyncio
+    async def test_self_test_carries_contract_version(self, app_client, auth_headers, sample_model, sample_channel):
+        resp = await app_client.post("/v1/ac/self-test", headers=auth_headers, json={})
+        assert resp.status_code == 200
+        assert resp.json().get("contract_version") >= 1
+
+    def test_notice_with_change_type_and_affected(self, db_session):
+        notice = notices_center.create_notice(
+            title="新增错误码", body="说明", level="info",
+            change_type="error_code_change", affected=["all_candidates_empty_content", "/v1/chat/completions"],
+            session=db_session,
+        )
+        assert notice["change_type"] == "error_code_change"
+        assert "all_candidates_empty_content" in notice["affected"]
+
+    def test_notice_rejects_unknown_change_type(self, db_session):
+        with pytest.raises(ValueError):
+            notices_center.create_notice(title="x", body="", change_type="whatever", session=db_session)

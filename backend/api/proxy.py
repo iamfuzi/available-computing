@@ -907,6 +907,7 @@ def ac_self_test(
         }
 
     key_limits = _key_limits_payload()
+    from services.contract import CONTRACT_VERSION as _CONTRACT_VERSION
     from services.notices_center import active_notices as _active_notices
     notices = [
         {k: n.get(k) for k in ("id", "ts", "level", "title", "action_required")}
@@ -928,6 +929,7 @@ def ac_self_test(
             "candidate_count": 0,
             "key_limits": key_limits,
             "notices": notices,
+            "contract_version": _CONTRACT_VERSION,
         }
 
     checked: list[dict] = []
@@ -953,6 +955,7 @@ def ac_self_test(
             "checked": checked,
             "key_limits": key_limits,
             "notices": notices,
+            "contract_version": _CONTRACT_VERSION,
         }
 
     return {
@@ -965,6 +968,7 @@ def ac_self_test(
         "checked": checked,
         "key_limits": key_limits,
         "notices": notices,
+        "contract_version": _CONTRACT_VERSION,
     }
 
 

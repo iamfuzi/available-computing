@@ -45,6 +45,7 @@ export default function IntegrationGuide() {
             }`}
           >
             <div className="font-medium">
+              {n.change_type && <span className="mr-1.5 font-mono text-[10px] bg-white/60 rounded px-1 py-0.5">{n.change_type}</span>}
               {n.action_required && <span className="mr-1.5">⚠️ 需要适配</span>}
               {n.title}
               <span className="ml-2 text-xs opacity-60">{new Date(n.ts).toLocaleDateString()}</span>

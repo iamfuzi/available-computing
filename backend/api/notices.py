@@ -15,6 +15,8 @@ class NoticeCreate(BaseModel):
     level: str = "info"  # info / warning / breaking
     action_required: bool = False
     expires_at: str | None = None  # ISO 时间，到期自动隐藏
+    change_type: str | None = None  # 契约 CHANGE_TYPES 枚举，机器可判
+    affected: list[str] | None = None  # 影响清单（端点/模型/错误码）
 
 
 @router.get("")
@@ -34,6 +36,7 @@ def create_notice_api(
         return notices_center.create_notice(
             title=body.title, body=body.body, level=body.level,
             action_required=body.action_required, expires_at=body.expires_at,
+            change_type=body.change_type, affected=body.affected,
             session=session,
         )
     except ValueError as exc:
