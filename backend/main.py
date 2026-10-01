@@ -100,11 +100,16 @@ if _static_dir.exists():
     _spa_index = _static_dir / "index.html"
 
     class SPAFallback(BaseHTTPMiddleware):
+        _api_prefixes = ("/api/", "/v1/", "/ws", "/docs", "/openapi", "/redoc")
+
         async def dispatch(self, request: Request, call_next):
             response: Response = await call_next(request)
             if response.status_code == 404 and request.method == "GET":
-                accept = request.headers.get("accept", "")
-                if "text/html" in accept and _spa_index.exists():
+                # 前端路由对所有 GET 客户端可达（程序探测常不带
+                # Accept: text/html，此前 404——hotspot 实报 2026-10-01）。
+                # API 前缀保持 JSON 404，不能退化为 HTML。
+                path = request.url.path
+                if not path.startswith(self._api_prefixes) and _spa_index.exists():
                     return FileResponse(str(_spa_index), media_type="text/html")
             return response
 

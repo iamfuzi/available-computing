@@ -102,3 +102,25 @@ class TestContract:
     def test_notice_rejects_unknown_change_type(self, db_session):
         with pytest.raises(ValueError):
             notices_center.create_notice(title="x", body="", change_type="whatever", session=db_session)
+
+
+class TestSpaFallbackAndPlaybook:
+    @pytest.mark.asyncio
+    async def test_integration_route_reachable_without_html_accept(self, app_client):
+        # 程序探测（Accept: */*）也要能拿到 /integration（SPA 回退不再
+        # 要求 text/html；hotspot 实报 404）
+        r = await app_client.get("/integration", headers={"Accept": "*/*"})
+        assert r.status_code == 200
+        assert "text/html" in r.headers.get("content-type", "")
+
+    @pytest.mark.asyncio
+    async def test_api_404_stays_json_not_html(self, app_client):
+        r = await app_client.get("/api/v1/nonexistent")
+        assert r.status_code == 404
+        assert "text/html" not in r.headers.get("content-type", "")
+
+    def test_contract_contains_playbook(self):
+        from services.contract import contract_payload, CHANGE_TYPES
+        playbook = contract_payload()["playbook"]
+        assert set(playbook.keys()) == set(CHANGE_TYPES)
+        assert playbook["error_code_change"]["action"] == "fetch_error_codes_and_diff"

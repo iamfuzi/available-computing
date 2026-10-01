@@ -86,12 +86,47 @@ CHANGE_TYPES = (
 )
 
 
+# 每类公告的确定性处置动作（docs/06 §1.4 同源）。调用方告警触发后可
+# 从契约端点动态拉取，无需存档手册。
+PLAYBOOK = {
+    "error_code_change": {
+        "action": "fetch_error_codes_and_diff",
+        "note": "拉取契约 error_codes 对照自身分支；未知码按 retryable 兜底",
+    },
+    "behavior_change": {
+        "action": "run_integration_selftest",
+        "note": "固定用例跑集成自检；异常则人工介入",
+    },
+    "deprecation": {
+        "action": "alert_and_schedule_migration",
+        "note": "告警并按 affected 排期迁移",
+    },
+    "maintenance": {
+        "action": "pause_or_queue",
+        "note": "窗口内暂停调度或入队（affected 含时间）",
+    },
+    "new_endpoint": {
+        "action": "optional_adopt",
+        "note": "可选接入，无动作要求",
+    },
+    "limit_change": {
+        "action": "recalibrate_local_throttle",
+        "note": "按新限额校准本地节流",
+    },
+    "other": {
+        "action": "alert_human",
+        "note": "人工阅读公告正文",
+    },
+}
+
+
 def contract_payload() -> dict:
     from config import PROXY_API_KEY_RATE_LIMIT
     return {
         "contract_version": CONTRACT_VERSION,
         "error_codes": ERROR_CODES,
         "change_types": list(CHANGE_TYPES),
+        "playbook": PLAYBOOK,
         "auto_route_promise": {
             "clean_content": True,
             "note": "auto:* 返回的 message.content 直接可用；不路由内联思考模型",
