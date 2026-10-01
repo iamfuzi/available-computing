@@ -38,6 +38,8 @@ def _run_migrations() -> None:
 
     backend_dir = Path(__file__).parent
     cfg = Config(str(backend_dir / "alembic.ini"))
+    # 不让 alembic 的 fileConfig 重新配置应用日志（见 env.py 注释）
+    cfg.attributes["configure_logger"] = False
     cfg.set_main_option("script_location", str(backend_dir / "alembic"))
     head_rev = ScriptDirectory.from_config(cfg).get_current_head()
 

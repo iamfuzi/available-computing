@@ -19,7 +19,12 @@ config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 程序化调用（database._run_migrations，置 configure_logger=False）时
+    # 不能动应用日志：fileConfig 默认 disable_existing_loggers=True，会把
+    # uvicorn/应用的 INFO 配置换成 alembic.ini 的 WARNING——请求日志与
+    # 异常堆栈自此全灭（2026-10-01 接入演练定位）。
+    if config.attributes.get("configure_logger", True):
+        fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = SQLModel.metadata
 
