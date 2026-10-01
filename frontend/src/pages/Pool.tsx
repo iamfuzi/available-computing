@@ -12,12 +12,36 @@ import AddChannelModal from '../components/AddChannelModal'
 const CATEGORIES = ['全部', '文本', '多模态', '代码', '嵌入', '重排', '图像', '视频']
 const CAT_MAP: Record<string, string> = { 文本: 'text', 多模态: 'vision', 代码: 'code', 嵌入: 'embedding', 重排: 'rerank', 图像: 'image', 视频: 'video' }
 
+// 状态筛选三档：默认"可参与路由"与实际路由口径一致（healthy+slow）。
+// "仅亚秒"是旧"仅健康"的准确名称——健康只是亚秒分档线，不是可用性线。
+type StatusFilter = 'routable' | 'fast' | 'all'
+const STATUS_FILTERS: [StatusFilter, string, string][] = [
+  ['routable', '可参与路由', '健康 + 降权模型：实际参与 auto 路由调用的全部候选'],
+  ['fast', '仅亚秒响应', '仅首响应 <1s 的健康模型（旧"仅健康"，只是快慢分档，不代表其他模型不可用）'],
+  ['all', '全部状态', '含不可用、冷却中、待探测的模型（仅排查用）'],
+]
+
+function routingInfo(status: string | null): { label: string; dot: string; title: string } {
+  switch (status) {
+    case 'healthy':
+      return { label: '优先', dot: 'bg-green-500', title: '参与 auto 路由，优先选择' }
+    case 'slow':
+      return { label: '降权可用', dot: 'bg-amber-400', title: '参与 auto 路由，排序靠后（响应 >1s）' }
+    case 'rate_limited':
+      return { label: '冷却中', dot: 'bg-purple-400', title: '上游 429 冷却中，暂不路由，到期自动恢复' }
+    case 'down':
+      return { label: '不路由', dot: 'bg-red-400', title: '探测失败，恢复后自动回池' }
+    default:
+      return { label: '待探测', dot: 'bg-gray-300', title: '尚未真实验证，不参与路由' }
+  }
+}
+
 export default function Pool() {
   const [summary, setSummary] = useState<PoolSummary | null>(null)
   const [models, setModels] = useState<ModelRow[]>([])
   const [q, setQ] = useState('')
   const [category, setCategory] = useState('全部')
-  const [healthyOnly, setHealthyOnly] = useState(true)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('routable')
   const [sortBy, setSortBy] = useState<'fast' | 'smart'>('fast')
   const [showAddModal, setShowAddModal] = useState(false)
   const [menuOpen, setMenuOpen] = useState<string | null>(null)
@@ -39,7 +63,11 @@ export default function Pool() {
           free_only: true,
           q: q || undefined,
           category: category !== '全部' ? CAT_MAP[category] : undefined,
-          healthy_only: healthyOnly,
+          ...(statusFilter === 'routable'
+            ? { routable_only: true }
+            : statusFilter === 'fast'
+              ? { healthy_only: true }
+              : { healthy_only: false, hide_down: false, include_rate_limited: true }),
           provider: provider || undefined,
           sort_by: sortBy,
         }, signal),
@@ -53,7 +81,7 @@ export default function Pool() {
     } finally {
       setLoading(false)
     }
-  }, [q, category, healthyOnly, provider, sortBy])
+  }, [q, category, statusFilter, provider, sortBy])
 
   useEffect(() => {
     channelsApi.list().then(setChannels).catch(() => {})
@@ -228,15 +256,20 @@ export default function Pool() {
               </select>
               )
             })()}
-            <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={healthyOnly}
-                onChange={(e) => setHealthyOnly(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              仅健康
-            </label>
+            <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
+              {STATUS_FILTERS.map(([val, label, tip]) => (
+                <button
+                  key={val}
+                  onClick={() => setStatusFilter(val)}
+                  className={`text-xs px-2.5 py-1 rounded-md transition-colors whitespace-nowrap ${
+                    statusFilter === val ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                  }`}
+                  title={tip}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
               <button
                 onClick={() => setSortBy('fast')}
@@ -283,6 +316,7 @@ export default function Pool() {
                     <th className="px-4 py-3 text-left font-medium hidden sm:table-cell">上下文</th>
                     <th className="px-4 py-3 text-left font-medium hidden md:table-cell">参数量</th>
                     <th className="px-4 py-3 text-left font-medium hidden md:table-cell">免费类型</th>
+                    <th className="px-4 py-3 text-left font-medium">路由</th>
                     <th className="px-4 py-3 text-left font-medium">状态</th>
                     <th className="px-4 py-3 w-10"></th>
                   </tr>
@@ -315,6 +349,17 @@ export default function Pool() {
                       </td>
                       <td className="px-4 py-3 hidden md:table-cell">
                         <FreeTypeBadge freeType={m.free_type} source={m.free_source} isFree={m.is_free} />
+                      </td>
+                      <td className="px-4 py-3">
+                        {(() => {
+                          const ri = routingInfo(m.health_status)
+                          return (
+                            <span className="inline-flex items-center gap-1.5 text-xs text-gray-600" title={ri.title}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${ri.dot}`} />
+                              {ri.label}
+                            </span>
+                          )
+                        })()}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex flex-col items-start gap-1">
@@ -364,7 +409,7 @@ export default function Pool() {
           )}
 
           <div className="px-4 py-2.5 text-xs text-gray-400 border-t border-gray-100">
-            共 {models.length} 个模型 · {sortBy === 'smart' ? '按参数量排序' : '按响应速度排序'}
+            共 {models.length} 个模型 · {STATUS_FILTERS.find(([v]) => v === statusFilter)?.[1]} · {sortBy === 'smart' ? '按参数量排序' : '按响应速度排序'}
           </div>
         </div>
       )}

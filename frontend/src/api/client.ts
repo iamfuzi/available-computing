@@ -250,6 +250,9 @@ export interface ModelListParams {
   category?: string
   free_only?: boolean
   healthy_only?: boolean
+  routable_only?: boolean
+  hide_down?: boolean
+  include_rate_limited?: boolean
   q?: string
   sort_by?: 'smart' | 'fast'
 }
