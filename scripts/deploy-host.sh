@@ -49,6 +49,7 @@ docker run -d --name available-computing \
     -e DATA_DIR=/app/data \
     -e PROXY_PROVIDER_RPM=60 \
     -e PROXY_DEFAULT_MODEL_RPM=30 \
+    -e PROXY_API_KEY_RATE_LIMIT=300 \
     -e PROXY_PASSTHROUGH_TIMEOUT_SECONDS=60 \
     -e JWT_SECRET_FILE=/run/secrets/ac_jwt_secret \
     -e ADMIN_PASSWORD_FILE=/run/secrets/ac_admin_password \

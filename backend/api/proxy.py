@@ -436,28 +436,54 @@ def _effective_provider_rpm(session: Session, channel_id: str) -> int:
     return PROXY_PROVIDER_RPM
 
 
+def _effective_model_rpm(session: Session, model: Model) -> int | None:
+    """Per-model RPM with this priority: Setting ``model_rpm:<model_id>``
+    (admin adjudication, wins over everything) → observed/whitelisted value
+    → PROXY_DEFAULT_MODEL_RPM floor. The Setting exists because the floor is
+    one-size-fits-all: siliconflow's embeddings/rerank models never send
+    rate-limit headers, so the floor pinned them at 30 RPM and hotspot's
+    rerank bursts were shed locally while the provider had plenty of real
+    headroom (2026-10-02)."""
+    from models import Setting
+
+    row = session.get(Setting, f"model_rpm:{model.model_id}")
+    if row is not None:
+        try:
+            value = int(row.value)
+        except (TypeError, ValueError):
+            value = 0
+        # 0 / unparseable = "not set": fall through to observed → floor.
+        if value > 0:
+            return value
+    limits = _parse_rate_limit_json(model)
+    rpm = limits.get("rpm")
+    if isinstance(rpm, int) and rpm > 0:
+        return rpm
+    return PROXY_DEFAULT_MODEL_RPM if PROXY_DEFAULT_MODEL_RPM > 0 else None
+
+
 def _check_model_budget(model: Model, session: Session) -> None:
     """Skip a model before calling upstream when local request budget is full.
 
     Three layers:
-    1. per-model RPM from observed rate-limit headers (or the manual
-       whitelist), with PROXY_DEFAULT_MODEL_RPM as a floor for providers
-       that never send rate-limit headers (zhipu/xfyun) — without the floor
-       the local budget silently never engages and bursts eat live 429s;
+    1. per-model RPM (Setting ``model_rpm:<model_id>`` override, else
+       observed rate-limit headers / manual whitelist, else the
+       PROXY_DEFAULT_MODEL_RPM floor for providers that never send
+       rate-limit headers (zhipu/xfyun)) — without the floor the local
+       budget silently never engages and bursts eat live 429s;
     2. per-model RPD (observed/whitelisted only);
     3. per-provider RPM over all models of the channel (PROXY_PROVIDER_RPM).
     """
-    limits = _parse_rate_limit_json(model)
     now = _now_utc()
-    rpm = limits.get("rpm")
-    if not (isinstance(rpm, int) and rpm > 0):
-        rpm = PROXY_DEFAULT_MODEL_RPM if PROXY_DEFAULT_MODEL_RPM > 0 else None
+    rpm = _effective_model_rpm(session, model)
     if rpm:
         since = now - timedelta(seconds=60)
         if _passive_call_count(session, model.id, since) >= rpm:
             raise ModelBudgetExceeded(60, "local_rpm_exceeded")
 
-    rpd = limits.get("rpd")
+    # RPD has no Setting override on purpose: it only trusts observed headers
+    # and the manual whitelist, which are already per-model authoritative.
+    rpd = _parse_rate_limit_json(model).get("rpd")
     if isinstance(rpd, int) and rpd > 0:
         day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         if _passive_call_count(session, model.id, day_start) >= rpd:

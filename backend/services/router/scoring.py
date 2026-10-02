@@ -60,14 +60,48 @@ def recent_success_rate(model: Model, session: Session) -> float:
     return good / len(records)
 
 
+def recent_traffic_evidence(model: Model, session: Session) -> tuple[float, int | None]:
+    """(success rate, real-traffic latency median) from the most recent records.
+
+    One query serves both scoring signals. Success counts passive and active
+    records alike — a probe pass is aliveness evidence. Latency, however, only
+    trusts passive (real-traffic) records: probes send tiny payloads, so their
+    response time says nothing about how the model serves a real request.
+    Using probe latency for ranking made every freshly probed model jump to
+    the front of its health bucket (a 550B model answered a 5-character
+    question in 12s because a 200-token probe ran sub-second, 2026-10-02).
+    Returns latency=None when the model has no real-traffic history yet.
+    """
+    records = session.exec(
+        select(HealthRecord)
+        .where(HealthRecord.model_id == model.id)
+        .order_by(HealthRecord.checked_at.desc())
+        .limit(RECENT_SCORE_LIMIT)
+    ).all()
+    if not records:
+        return (1.0 if model.health_status == "healthy" else 0.0), None
+    good = sum(1 for r in records if r.status == "healthy")
+    passive_ms = sorted(
+        r.response_ms for r in records
+        if r.is_passive and r.status == "healthy" and r.response_ms is not None
+    )
+    median_ms = passive_ms[len(passive_ms) // 2] if passive_ms else None
+    return good / len(records), median_ms
+
+
 def route_score_key(model: Model, session: Session, smart: bool = False) -> tuple:
     """Composite sort key for routing candidates (lower is better).
 
     Order: health bucket → success rate → (param size when smart) → latency → id.
+    Latency uses the real-traffic median when available and falls back to
+    last_response_ms (probe value) only for models never called by traffic.
     """
     priority = HEALTH_ORDER.get(model.health_status, 3)
-    success_penalty = -recent_success_rate(model, session)
-    ms = model.last_response_ms if model.last_response_ms is not None else 999999
+    rate, traffic_ms = recent_traffic_evidence(model, session)
+    success_penalty = -rate
+    ms = traffic_ms if traffic_ms is not None else (
+        model.last_response_ms if model.last_response_ms is not None else 999999
+    )
     size = -(model.param_size or 0) if smart else 0
     return (priority, success_penalty, size, ms, model.model_id)
 

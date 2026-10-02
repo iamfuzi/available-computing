@@ -4,6 +4,20 @@
 
 ## [未发布]
 
+### 2026-10-02 高峰容量与路由质量批次
+
+**数据库连接池**
+- QueuePool 从默认 5+10 提至 `DB_POOL_SIZE=30` / `DB_MAX_OVERFLOW=60`（env 可配）+ SQLite busy timeout 15s——流量高峰（~150 req/min）与备份/清理任务重叠窗口出现 6 次连接池耗尽（30s 等待后 500）
+
+**限流预算**
+- 新增 per-model RPM 覆写 Setting `model_rpm:<model_id>`（优先级：Setting → 观测头/白名单 → PROXY_DEFAULT_MODEL_RPM 地板）。动机：硅基 embeddings/rerank 不发限流头，30 RPM 地板把热点重排高峰 shed 掉 16%（26 分钟 440 次 local_model_budget_exceeded）
+- `deploy-host.sh` 显式 `PROXY_API_KEY_RATE_LIMIT=300`（默认 120 在高峰不够用）
+- 生产 Setting：`model_rpm:BAAI/bge-reranker-v2-m3=300`、`model_rpm:BAAI/bge-m3=300`、`provider_rpm:硅基=600`
+
+**路由评分**
+- `route_score_key` 延迟信号改用近期**真实流量（passive）成功记录的中位数**，无被动历史才回退 `last_response_ms`（探测值）。动机：探测小 payload 延迟覆盖点值后，每次探测扫尾 auto:text 都偏向刚验证的重型模型（550B 模型 12s 答 5 字问题）；探测记录不再污染排序
+- 成功率与延迟合并为一次查询（`recent_traffic_evidence`），原 `recent_success_rate` 保留兼容
+
 ### 2026-09-30 生产诊断与修复批次
 
 **探测体系（三份适配器同款误杀修复）**

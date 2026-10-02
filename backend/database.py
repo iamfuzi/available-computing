@@ -1,12 +1,17 @@
 from sqlmodel import SQLModel, create_engine, Session
 from sqlalchemy import event, text, inspect
-from config import DATABASE_URL
+from config import DATABASE_URL, DB_MAX_OVERFLOW, DB_POOL_SIZE
 
 # Import models so SQLModel.metadata is fully populated before create_all runs,
 # regardless of import order at the call site.
 import models  # noqa: F401
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False, "timeout": 15},
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW,
+)
 
 
 @event.listens_for(engine, "connect")

@@ -7,6 +7,15 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 DATABASE_URL = f"sqlite:///{DATA_DIR}/db.sqlite"
 
+# SQLAlchemy QueuePool sizing. Each in-flight request holds one connection for
+# its whole lifetime (upstream calls can run tens of seconds), and background
+# jobs (flush_usage, passive health records, probes) take more — the default
+# pool of 5+10 exhausted during traffic peaks and failed requests with
+# QueuePool timeouts (2026-10-02). SQLite WAL handles many concurrent readers,
+# so a generous ceiling is safe.
+DB_POOL_SIZE = int(os.environ.get("DB_POOL_SIZE", "30"))
+DB_MAX_OVERFLOW = int(os.environ.get("DB_MAX_OVERFLOW", "60"))
+
 WHITELIST_PATH = Path(os.environ.get(
     "WHITELIST_PATH",
     str(Path(__file__).parent.parent / "whitelist" / "providers.yaml"),
