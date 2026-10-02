@@ -443,7 +443,13 @@ def _effective_model_rpm(session: Session, model: Model) -> int | None:
     one-size-fits-all: siliconflow's embeddings/rerank models never send
     rate-limit headers, so the floor pinned them at 30 RPM and hotspot's
     rerank bursts were shed locally while the provider had plenty of real
-    headroom (2026-10-02)."""
+    headroom (2026-10-02).
+
+    The key matches on ``model.model_id`` (the public name), so it applies to
+    EVERY channel carrying that name — 24 free models exist on two channels
+    (OpenRouter + Kilo). Each channel's copy counts its own window separately
+    (counting is per internal id), so the override widens both, never just one.
+    """
     from models import Setting
 
     row = session.get(Setting, f"model_rpm:{model.model_id}")
