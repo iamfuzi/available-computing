@@ -209,6 +209,90 @@ class TestActiveProbe:
         assert records[0].is_passive is False
 
     @pytest.mark.asyncio
+    async def test_recent_real_call_skips_probe_for_routable_model(self, db_session, sample_model, sample_channel):
+        # Passive tracking is fresh while a routable model serves traffic —
+        # an active probe would duplicate evidence and burn quota.
+        from services.health import active_probe
+        sample_model.health_status = "slow"
+        sample_model.last_real_call_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        db_session.add(sample_model)
+        db_session.commit()
+        with patch("adapters.openrouter.OpenRouterAdapter.health_check",
+                   new=AsyncMock(return_value=HealthInfo(status="healthy", response_ms=120))) as hc:
+            result = await active_probe(sample_model, "sk-test")
+        assert result is None
+        hc.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recent_real_call_does_not_skip_unknown_model(self, db_session, sample_model, sample_channel):
+        # unknown is unroutable — skipping the probe would strand the model
+        # out of the pool for as long as its last_real_call_at stays fresh
+        # (the heartbeat sweep only reaches ≥7-day-idle models).
+        from services.health import active_probe
+        sample_model.health_status = "unknown"
+        sample_model.last_real_call_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        db_session.add(sample_model)
+        db_session.commit()
+        with patch("adapters.openrouter.OpenRouterAdapter.health_check",
+                   new=AsyncMock(return_value=HealthInfo(status="slow", response_ms=900))):
+            await active_probe(sample_model, "sk-test")
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "slow"
+        assert db_session.exec(select(HealthRecord)).all() != []
+
+
+class TestRecoverExpiredCooldowns:
+    @pytest.mark.asyncio
+    async def test_expired_cooldown_returns_verified_model_to_slow(
+        self, db_session, sample_model, sample_channel
+    ):
+        # A 429 is quota evidence, not health evidence: a previously verified
+        # model rejoins routing (deprioritized) once its cooldown passes.
+        from services.health import recover_expired_cooldowns
+        sample_model.health_status = "rate_limited"
+        sample_model.rate_limited_until = datetime.now(timezone.utc) - timedelta(minutes=1)
+        sample_model.last_verified_at = datetime.now(timezone.utc) - timedelta(days=1)
+        db_session.add(sample_model)
+        db_session.commit()
+
+        restored = await recover_expired_cooldowns()
+        assert restored == 1
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "slow"
+        assert sample_model.rate_limited_until is None
+
+    @pytest.mark.asyncio
+    async def test_expired_cooldown_never_verified_goes_unknown(
+        self, db_session, sample_model, sample_channel
+    ):
+        # Unverified models must not enter routing without probe evidence;
+        # the down/unknown recheck sweep verifies them instead.
+        from services.health import recover_expired_cooldowns
+        sample_model.health_status = "rate_limited"
+        sample_model.rate_limited_until = datetime.now(timezone.utc) - timedelta(minutes=1)
+        sample_model.last_verified_at = None
+        db_session.add(sample_model)
+        db_session.commit()
+
+        await recover_expired_cooldowns()
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "unknown"
+
+    @pytest.mark.asyncio
+    async def test_unexpired_cooldown_untouched(self, db_session, sample_model, sample_channel):
+        from services.health import recover_expired_cooldowns
+        until = datetime.now(timezone.utc) + timedelta(minutes=10)
+        sample_model.health_status = "rate_limited"
+        sample_model.rate_limited_until = until
+        db_session.add(sample_model)
+        db_session.commit()
+
+        restored = await recover_expired_cooldowns()
+        assert restored == 0
+        db_session.refresh(sample_model)
+        assert sample_model.health_status == "rate_limited"
+
+    @pytest.mark.asyncio
     async def test_probe_method_is_saved_on_success(self, db_session, sample_model, sample_channel):
         from services.health import active_probe
         with patch("adapters.openrouter.OpenRouterAdapter.health_check",

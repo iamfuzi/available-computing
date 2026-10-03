@@ -223,18 +223,26 @@ def test_official_review_keeps_kilo_for_integration():
 
 @pytest.mark.asyncio
 async def test_reprobe_down_models_probes_down_free_models(db_session, sample_channel, monkeypatch):
-    """down 免费模型被重探；healthy/付费/down 渠道禁用的不探"""
+    """down/unknown 免费模型被重探；healthy/付费/渠道禁用的不探。
+
+    unknown 与 down 同为路由排除态且无及时的定时复验（心跳只覆盖闲置
+    ≥7 天的模型），Groq 免费模型曾在 unknown 沉睡三天。
+    """
     from services import health as health_service
     from models import Model, Channel
     from unittest.mock import AsyncMock
 
     down_free = Model(channel_id=sample_channel.id, model_id="down-free",
                       category="text", is_free=True, is_active=True, health_status="down")
+    unknown_free = Model(channel_id=sample_channel.id, model_id="unknown-free",
+                         category="text", is_free=True, is_active=True, health_status="unknown")
     healthy_free = Model(channel_id=sample_channel.id, model_id="healthy-free",
                          category="text", is_free=True, is_active=True, health_status="healthy")
     down_paid = Model(channel_id=sample_channel.id, model_id="down-paid",
                       category="text", is_free=False, is_active=True, health_status="down")
-    db_session.add_all([down_free, healthy_free, down_paid])
+    unknown_paid = Model(channel_id=sample_channel.id, model_id="unknown-paid",
+                         category="text", is_free=False, is_active=True, health_status="unknown")
+    db_session.add_all([down_free, unknown_free, healthy_free, down_paid, unknown_paid])
     db_session.commit()
 
     probed = []
@@ -249,5 +257,5 @@ async def test_reprobe_down_models_probes_down_free_models(db_session, sample_ch
     monkeypatch.setattr(h, "engine", db_session.get_bind())
 
     count = await h.reprobe_down_models()
-    assert count == 1
-    assert probed == ["down-free"]
+    assert count == 2
+    assert sorted(probed) == ["down-free", "unknown-free"]

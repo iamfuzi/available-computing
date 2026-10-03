@@ -54,14 +54,22 @@ def _set_channel_status(
 
 
 async def recover_expired_cooldowns():
-    """Restore models whose rate-limit cooldown has expired.
+    """Return models whose rate-limit cooldown expired to the routable pool.
 
-    A model marked ``rate_limited`` carries a ``rate_limited_until`` timestamp.
-    Once that timestamp passes, the model is callable again, but nothing reset
-    its ``health_status`` — it stayed ``rate_limited`` forever until the next
-    probe sweep happened to reach it. This flips expired cooldowns back to
-    ``unknown`` so the next probe re-evaluates them promptly. Run frequently
-    (every few minutes) so recovered models don't linger as "limited".
+    A 429 is quota evidence, not health evidence: the model was demonstrably
+    callable (it got limited while being used). Once the cooldown passes, a
+    previously-verified model therefore rejoins routing as ``slow``
+    (routable, deprioritized) — the next real success re-ranks it, and repeat
+    429s meet the growing ``consecutive_429`` backoff.
+
+    Flipping to ``unknown`` instead (the old behavior) silently evicted the
+    model: routing excludes ``unknown``, and the only scheduled sweep that
+    reaches unknown models covers ≥7-day-idle ones — a model that just served
+    traffic has a fresh anchor and waits out the full week. One 429 under
+    load could thus remove a working model from the pool for days (Groq's
+    three free models sat out three days this way). Never-verified models
+    still go to ``unknown`` — unverified models must not enter routing; the
+    down/unknown recheck sweep verifies them instead.
     """
     now = datetime.now(timezone.utc)
     with Session(engine) as session:
@@ -79,7 +87,7 @@ async def recover_expired_cooldowns():
                 until = until.replace(tzinfo=timezone.utc)
             if until is not None and until > now:
                 continue
-            m.health_status = "unknown"
+            m.health_status = "slow" if m.last_verified_at else "unknown"
             m.rate_limited_until = None
             session.add(m)
             restored += 1
@@ -311,10 +319,11 @@ async def active_probe(
     force: bool = False,
 ):
     # Skip if there was a *successful* real call within the last 4 hours — a
-    # recent success means passive health tracking is already fresh. A failed
-    # real call (model marked down) must NOT skip probing, otherwise the model
-    # is stuck down with no chance to recover.
-    if not force and model.last_real_call_at and model.health_status not in ("down",):
+    # recent success means passive health tracking is already fresh. Failed or
+    # unroutable states (down / unknown) must NOT skip probing, otherwise the
+    # model is stuck out of the pool with no chance to recover — unknown
+    # included because no other scheduled sweep promptly reaches it.
+    if not force and model.last_real_call_at and model.health_status not in ("down", "unknown"):
         lrc = model.last_real_call_at
         if lrc.tzinfo is None:
             lrc = lrc.replace(tzinfo=timezone.utc)
@@ -626,14 +635,18 @@ async def probe_channel_models(
 
 
 async def reprobe_down_models() -> int:
-    """Re-probe free models currently marked down, so recovered suppliers
-    return to the pool automatically.
+    """Re-probe free models currently out of the pool (down or unknown), so
+    recovered suppliers and cooled-down stragglers return automatically.
 
     线上反复出现的问题：免费模型一次探测失败被标 down 后无人复检
     （心跳只覆盖 idle 模型且受渠道 RPD 预算限制，无 RPD 元数据的渠道
     整个被跳过），供应商恢复后池子仍瘫痪数日——siliconflow 的 Qwen
     系两次因此集体掉线，只能人工触发 probe_channel_models 找回。
-    本任务按渠道并发、渠道内串行重探 down 状态的免费模型。
+
+    unknown 同样纳入：它是新入库未验证、事件复检异常与（旧版）冷却
+    到期模型的落点，路由排除该状态，而心跳要等闲置 7 天才会碰到——
+    Groq 三个免费模型曾在 unknown 沉睡三天直到人工探测。预算上限与
+    最旧优先的轮转对 down/unknown 一视同仁。
 
     Returns: 本次实际探测的模型数。
     """
@@ -642,7 +655,7 @@ async def reprobe_down_models() -> int:
             select(Model)
             .where(Model.is_active == True)  # noqa: E712
             .where(Model.is_free == True)  # noqa: E712
-            .where(Model.health_status == "down")
+            .where(Model.health_status.in_(["down", "unknown"]))
         ).all()
         channels = {ch.id: ch for ch in session.exec(select(Channel)).all()}
         from services.crypto import decrypt as _decrypt
@@ -686,7 +699,7 @@ async def reprobe_down_models() -> int:
     total = sum(len(items) for items in by_channel.values())
     if not total:
         return 0
-    logger.info("Re-probing %d down free models across %d channels", total, len(by_channel))
+    logger.info("Re-probing %d down/unknown free models across %d channels", total, len(by_channel))
 
     channel_semaphore = asyncio.Semaphore(PROBE_GLOBAL_CONCURRENCY)
 

@@ -79,9 +79,10 @@ def init_scheduler(get_key_fn=None):
     # Monthly: decommission models that SiliconFlow has officially retired, so
     # the pool doesn't keep entries that fail every call. Runs on day 1 at 04:00
     # to avoid colliding with the daily cleanup (00:00).
-    # 定期重探 down 状态的免费模型：供应商恢复后自动回归池子，
-    # 不再需要人工触发 probe_channel_models（siliconflow Qwen 系
-    # 曾两次因此集体掉线数日）。
+    # 定期重探掉出池子的免费模型（down + unknown）：供应商恢复或冷却
+    # 到期后自动回归，不再需要人工触发 probe_channel_models
+    # （siliconflow Qwen 系曾两次因此集体掉线数日；Groq 三个免费模型
+    # 曾在 unknown 无人复检沉睡三天）。
     from services.health import reprobe_down_models
     scheduler.add_job(
         reprobe_down_models,
